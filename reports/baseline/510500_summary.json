@@ -1,0 +1,32 @@
+{
+  "symbol": "510500",
+  "name": "中证500ETF",
+  "source": "data/clean/510500.csv",
+  "short_window": 20,
+  "long_window": 60,
+  "fees": 0.0,
+  "bar_start": "2019-01-02",
+  "bar_end": "2026-10-30",
+  "in_sample_end": "2023-12-31",
+  "out_of_sample_start": "2024-01-01",
+  "in_sample": {
+    "period_return": -0.1324492293780204,
+    "max_drawdown": 0.28072603311378774,
+    "turnover": 0.019769357495881382,
+    "trade_count": 12
+  },
+  "out_of_sample": {
+    "period_return": -0.01865290217307558,
+    "max_drawdown": 0.25243881844723415,
+    "turnover": 0.017569546120058566,
+    "trade_count": 6
+  },
+  "decision": "reject",
+  "rule_id": "oos_drawdown",
+  "reason": "样本外最大回撤为 25.24%，超过 25% 的阈值，淘汰。",
+  "curve_rows": 1897,
+  "equity_start": 1.0,
+  "equity_end": 0.8513684309673967,
+  "curve": "510500_curve.csv",
+  "summary": "510500_summary.json"
+}

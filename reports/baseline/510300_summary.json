@@ -1,0 +1,32 @@
+{
+  "symbol": "510300",
+  "name": "沪深300ETF",
+  "source": "data/clean/510300.csv",
+  "short_window": 20,
+  "long_window": 60,
+  "fees": 0.0,
+  "bar_start": "2019-01-02",
+  "bar_end": "2026-10-30",
+  "in_sample_end": "2023-12-31",
+  "out_of_sample_start": "2024-01-01",
+  "in_sample": {
+    "period_return": -0.03431682203851394,
+    "max_drawdown": 0.2807144127806409,
+    "turnover": 0.02471169686985173,
+    "trade_count": 15
+  },
+  "out_of_sample": {
+    "period_return": 0.08811233235577798,
+    "max_drawdown": 0.14584966306114344,
+    "turnover": 0.020497803806734993,
+    "trade_count": 7
+  },
+  "decision": "reject",
+  "rule_id": "not_aligned",
+  "reason": "样本内外收益方向不一致，淘汰。",
+  "curve_rows": 1897,
+  "equity_start": 1.0,
+  "equity_end": 1.0507717750884122,
+  "curve": "510300_curve.csv",
+  "summary": "510300_summary.json"
+}

@@ -4,5 +4,7 @@ __pycache__/
 .venv/
 *.csv.tmp
 *.egg-info/
+.env
 reports/*
 !reports/.gitkeep
+!reports/baseline/
