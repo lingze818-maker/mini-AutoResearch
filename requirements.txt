@@ -1,0 +1,4 @@
+vectorbt>=0.26
+pandas>=2.0
+pyyaml>=6
+pytest>=8
