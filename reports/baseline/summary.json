@@ -1,0 +1,109 @@
+{
+  "strategy": "ma_cross",
+  "short_window": 20,
+  "long_window": 60,
+  "fees": 0.0,
+  "adjust": "qfq",
+  "fill": "信号用当日收盘，下一根 bar 的收盘成交",
+  "in_sample_end": "2023-12-31",
+  "out_of_sample_start": "2024-01-01",
+  "disclaimer": "pass 只表示没有触发淘汰线，不表示策略盈利，也不表示可以实盘。",
+  "symbols": [
+    {
+      "symbol": "510300",
+      "name": "沪深300ETF",
+      "source": "data/clean/510300.csv",
+      "short_window": 20,
+      "long_window": 60,
+      "fees": 0.0,
+      "bar_start": "2019-01-02",
+      "bar_end": "2026-10-30",
+      "in_sample_end": "2023-12-31",
+      "out_of_sample_start": "2024-01-01",
+      "in_sample": {
+        "period_return": -0.03431682203851394,
+        "max_drawdown": 0.2807144127806409,
+        "turnover": 0.02471169686985173,
+        "trade_count": 15
+      },
+      "out_of_sample": {
+        "period_return": 0.08811233235577798,
+        "max_drawdown": 0.14584966306114344,
+        "turnover": 0.020497803806734993,
+        "trade_count": 7
+      },
+      "decision": "reject",
+      "rule_id": "not_aligned",
+      "reason": "样本内外收益方向不一致，淘汰。",
+      "curve_rows": 1897,
+      "equity_start": 1.0,
+      "equity_end": 1.0507717750884122,
+      "curve": "510300_curve.csv",
+      "summary": "510300_summary.json"
+    },
+    {
+      "symbol": "510500",
+      "name": "中证500ETF",
+      "source": "data/clean/510500.csv",
+      "short_window": 20,
+      "long_window": 60,
+      "fees": 0.0,
+      "bar_start": "2019-01-02",
+      "bar_end": "2026-10-30",
+      "in_sample_end": "2023-12-31",
+      "out_of_sample_start": "2024-01-01",
+      "in_sample": {
+        "period_return": -0.1324492293780204,
+        "max_drawdown": 0.28072603311378774,
+        "turnover": 0.019769357495881382,
+        "trade_count": 12
+      },
+      "out_of_sample": {
+        "period_return": -0.01865290217307558,
+        "max_drawdown": 0.25243881844723415,
+        "turnover": 0.017569546120058566,
+        "trade_count": 6
+      },
+      "decision": "reject",
+      "rule_id": "oos_drawdown",
+      "reason": "样本外最大回撤为 25.24%，超过 25% 的阈值，淘汰。",
+      "curve_rows": 1897,
+      "equity_start": 1.0,
+      "equity_end": 0.8513684309673967,
+      "curve": "510500_curve.csv",
+      "summary": "510500_summary.json"
+    },
+    {
+      "symbol": "518880",
+      "name": "黄金ETF",
+      "source": "data/clean/518880.csv",
+      "short_window": 20,
+      "long_window": 60,
+      "fees": 0.0,
+      "bar_start": "2019-01-02",
+      "bar_end": "2026-10-30",
+      "in_sample_end": "2023-12-31",
+      "out_of_sample_start": "2024-01-01",
+      "in_sample": {
+        "period_return": 0.5826022834625391,
+        "max_drawdown": 0.18605157723736865,
+        "turnover": 0.01400329489291598,
+        "trade_count": 9
+      },
+      "out_of_sample": {
+        "period_return": 0.8348439694247125,
+        "max_drawdown": 0.24890793010752688,
+        "turnover": 0.013177159590043924,
+        "trade_count": 4
+      },
+      "decision": "pass",
+      "rule_id": "aligned_pass",
+      "reason": "样本内外收益方向一致，且回撤和换手未超过阈值，可以做一轮小改，或停止并保留记录。",
+      "curve_rows": 1897,
+      "equity_start": 1.0,
+      "equity_end": 2.9038282558090107,
+      "curve": "518880_curve.csv",
+      "summary": "518880_summary.json"
+    }
+  ]
+}
