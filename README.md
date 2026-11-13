@@ -2,7 +2,7 @@
 
 回测和评估骨架。用合成日线把「策略 → vectorbt 回测 → 指标 → 写死判定」跑通。价格按前复权（qfq）理解，和以后的数据层同一口径。仓库里没有密钥；API Key 只放环境变量。
 
-这一层读取已经清洗好的日线，不拉行情。`config.yaml` 里的数据源仍是已定的 akshare，取数和清洗另做。缺日和停牌不在这里补。Agent 循环、工具和沙箱也不在这里。
+回测读取已经清洗好的日线。取数在 `src/data`：用 akshare 的 `fund_etf_hist_em` 拉 510300、510500、518880 的前复权日线，区间是 2019-01-01 到 2026-10-31。缺日和停牌不补。Agent 循环、工具和沙箱不在这里。判定仍是原来的 `src/eval`。
 
 ## 安装
 
@@ -21,6 +21,19 @@ PYTHONPATH=src python -m backtest.cli --csv tests/fixtures/synthetic_daily_bars.
 默认把净值曲线写到 `reports/fixture_run_curve.csv`，把指标和判定写到 `reports/fixture_run_summary.json`，并在标准输出打印样本内、样本外的区间收益、最大回撤、换手、交易次数，以及判定。`--out` 只改输出前缀。
 
 `tests/fixtures/synthetic_daily_bars.csv` 是公式生成的日线，不是 510300、510500、518880 的真实行情。另外三份曲线夹具只用来走查判定：通过、回撤淘汰、疑似过拟合。
+
+## 取数和清洗
+
+在仓库根目录，装好依赖后：
+
+```bash
+python -m src.data fetch
+python -m src.data clean
+```
+
+`fetch` 只向 akshare 要这三只 ETF 的日线，`adjust` 为 qfq，日期跟 `config.yaml`。成功后才写入 `data/raw/<symbol>.csv`。某一只失败时，已有的文件留着，错误里会写明 akshare、代码和日期区间。
+
+`clean` 只保留供应商返回的交易日，写成 `date, open, high, low, close, volume`，放到 `data/clean/<symbol>.csv`。不补日历，不编造价格。
 
 测试同样不访问网络：
 
