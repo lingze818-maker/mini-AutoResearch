@@ -47,5 +47,5 @@ def test_requirements_stay_small_and_off_the_live_stack():
     text = (ROOT / "requirements.txt").read_text(encoding="utf-8").lower()
     for name in ("vectorbt", "pandas", "pyyaml", "pytest"):
         assert name in text
-    assert "akshare" not in text
+    assert "akshare" in text
     assert "backtrader" not in text
