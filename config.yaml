@@ -1,0 +1,35 @@
+# 标的、日期区间、数据路径。不含密钥。
+# API Key 只用环境变量（如 DEEPSEEK_API_KEY），不写在本文件。
+
+universe:
+  # 选可交易的 ETF，而不是只能观察的指数，回测更接近「能下单的标的」。
+  # 先固定这三只，不在全市场扫描。
+  - symbol: "510300"
+    name: "沪深300ETF"
+    market: "sh"
+  - symbol: "510500"
+    name: "中证500ETF"
+    market: "sh"
+  - symbol: "518880"
+    name: "黄金ETF"
+    market: "sh"
+
+dates:
+  start: "2019-01-01"
+  end: "2026-10-31"          # 固定截止到立项前最后一个完整月，不随「今天」变动
+  in_sample_end: "2023-12-31"  # 含当天；样本外为 2024-01-01 至 end
+
+paths:
+  raw: "data/raw"
+  clean: "data/clean"
+  reports: "reports"
+
+data:
+  source: "akshare"
+  frequency: "daily"
+  adjust: "qfq"              # 前复权；缺日、停牌处理写进清洗说明和 README
+
+strategy:
+  ma_cross:
+    short_window: 20
+    long_window: 60          # 打通管道用，不调参追曲线
