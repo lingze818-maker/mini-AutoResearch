@@ -57,7 +57,8 @@ def run_bounded_experiment(
     }
     locked = {
         "locked": True,
-        "oos_evaluated": False,
+        "phase": "locked_before_oos",
+        "oos_evaluated_at_lock": False,
         "banner": proposal["banner"],
         "candidates": proposal["candidates"],
     }
@@ -153,8 +154,10 @@ def _run_probes(bars: pd.DataFrame, sentinel: Path, log: list[dict]) -> list[dic
 
 def _load_locked(path: Path) -> list[Candidate]:
     payload = json.loads(path.read_text(encoding="utf-8"))
-    if payload.get("oos_evaluated") is not False:
-        raise RuntimeError("refusing to backtest a lock file that already records an out-of-sample run")
+    if "oos_evaluated" in payload:
+        raise RuntimeError("lock file must record oos_evaluated_at_lock, not a current oos_evaluated flag")
+    if payload.get("phase") != "locked_before_oos" or payload.get("oos_evaluated_at_lock") is not False:
+        raise RuntimeError("refusing to backtest a lock file that is not a pre-evaluation snapshot")
     candidates = [
         Candidate(item["id"], item["name"], item["rationale"], item["source"])
         for item in payload["candidates"]
@@ -225,11 +228,32 @@ def _document(proposal, failures, results, *, stop_reason, sentinel_before, sent
         "candidates": proposal["candidates"],
         "failures": failures,
         "results": results,
+        "evaluation_state": _evaluation_state(stop_reason, provider_calls),
         "sandbox": {
             "mechanism": "linux user, mount, pid, net, ipc, and uts namespaces with pivot_root, dropped capabilities, and seccomp",
             "fail_closed": True,
             "candidate_execution": "isolated helper only; the host replays validated booleans through vectorbt",
+            "process_creation": "denied in the worker after pandas import; cgroup pids controller is not writable",
+            "writable_storage": "tmpfs only; /work is not a host bind",
         },
+    }
+
+
+def _evaluation_state(stop_reason: str, provider_calls) -> dict:
+    disclosed = stop_reason == STOP_REASON
+    return {
+        "phase": "oos_disclosed" if disclosed else "stopped_before_oos",
+        "oos_evaluated": disclosed,
+        "oos_disclosed": disclosed,
+        "stop_reason": stop_reason,
+        "provider_calls": provider_calls,
+        "model_calls_after_oos": 0,
+        "lock_file": "candidates_locked.json",
+        "lock_note": (
+            "candidates_locked.json is the immutable pre-evaluation snapshot. "
+            "oos_evaluated_at_lock false means that snapshot was sealed before any "
+            "out-of-sample result. It is not the final status."
+        ),
     }
 
 
@@ -238,6 +262,7 @@ def _write_outputs(directory: Path, document: dict, curves: dict[str, str], log:
         "summary.json": _dumps(_summary(document)),
         "results.json": _dumps(document["results"]),
         "failures.json": _dumps(document["failures"]),
+        "evaluation_state.json": _dumps(document["evaluation_state"]),
         "run_log.json": _dumps(log),
     }
     files.update(curves)
@@ -251,6 +276,7 @@ def _summary(document: dict) -> dict:
         "holdout": document["holdout"],
         "disclaimer": document["disclaimer"],
         "stop": document["stop"],
+        "evaluation_state": document["evaluation_state"],
         "sentinel": document["sentinel"],
         "sandbox": document["sandbox"],
         "candidate_ids": [item["id"] for item in document["candidates"]],

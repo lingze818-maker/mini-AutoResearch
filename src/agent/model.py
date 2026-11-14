@@ -10,6 +10,8 @@ from __future__ import annotations
 import json
 import os
 import re
+import urllib.parse
+import urllib.request
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 
@@ -20,6 +22,7 @@ from agent.limits import (
     MAX_MODEL_TOKENS,
     MAX_SOURCE_CHARS,
     MODEL_TIMEOUT_S,
+    OFFICIAL_API_HOST,
     OFFLINE_BANNER,
 )
 from agent.offline import Candidate, OfflineFixtureProvider
@@ -46,15 +49,48 @@ class HTTPResult:
 Transport = Callable[[str, Mapping[str, str], bytes, float], HTTPResult]
 
 
+class _RefuseRedirect(urllib.request.HTTPRedirectHandler):
+    """Do not send the bearer token to a second origin."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise ModelError("refusing to follow a redirect with the API credential")
+
+
+def official_completions_url(base_url: str) -> str:
+    """Accept only https://api.deepseek.com with no credentials, query, or port override."""
+    if not isinstance(base_url, str):
+        raise ModelError("DEEPSEEK_BASE_URL must be https://api.deepseek.com")
+    raw = base_url.strip()
+    if raw != base_url or any(char in raw for char in "\r\n\t "):
+        raise ModelError("DEEPSEEK_BASE_URL must be https://api.deepseek.com")
+    parts = urllib.parse.urlsplit(raw)
+    if parts.scheme != "https" or parts.hostname != OFFICIAL_API_HOST:
+        raise ModelError("DEEPSEEK_BASE_URL must be https://api.deepseek.com")
+    if parts.username or parts.password:
+        raise ModelError("DEEPSEEK_BASE_URL must not include credentials")
+    if parts.port not in (None, 443):
+        raise ModelError("DEEPSEEK_BASE_URL must be https://api.deepseek.com")
+    if parts.query or parts.fragment or parts.path not in ("", "/"):
+        raise ModelError("DEEPSEEK_BASE_URL must be https://api.deepseek.com")
+    return "https://api.deepseek.com/chat/completions"
+
+
 def urllib_transport(url: str, headers: Mapping[str, str], body: bytes, timeout_s: float) -> HTTPResult:
     import urllib.error
     import urllib.request
 
+    if url != official_completions_url(DEFAULT_BASE_URL):
+        raise ModelError("refusing to send the API credential to a non-official endpoint")
     request = urllib.request.Request(url, data=body, headers=dict(headers), method="POST")
+    opener = urllib.request.build_opener(_RefuseRedirect)
     try:
-        with urllib.request.urlopen(request, timeout=timeout_s) as response:
+        with opener.open(request, timeout=timeout_s) as response:
             return HTTPResult(status=getattr(response, "status", 200), body=response.read(1_000_000))
+    except ModelError:
+        raise
     except urllib.error.HTTPError as exc:
+        if exc.code in {301, 302, 303, 307, 308}:
+            raise ModelError("refusing to follow a redirect with the API credential") from None
         return HTTPResult(status=exc.code, body=exc.read(200_000))
 
 
@@ -234,7 +270,7 @@ class LiveDeepSeekProvider:
             raise ModelError("retry budget is outside the allowed range")
         self._api_key = api_key
         self._model = model
-        self._url = base_url.rstrip("/") + "/chat/completions"
+        self._url = official_completions_url(base_url)
         self._transport = transport
         self._max_calls = max_calls
         self._max_tokens = max_tokens

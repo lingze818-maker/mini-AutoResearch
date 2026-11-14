@@ -39,11 +39,19 @@ SECCOMP_RET_ERRNO = 0x00050000
 SECCOMP_RET_ALLOW = 0x7FFF0000
 EPERM = 1
 
-# Namespace-creating clone bits. Ordinary thread/fork clones stay allowed.
+# Namespace-creating clone bits. The bootstrap filter still allows an ordinary
+# fork so the trusted supervisor can start one worker, and so pandas can
+# initialize. The worker then denies every clone/fork. These byte sizes must
+# stay equal to agent.limits; tests compare them.
 _NS_MASK = 0x7E020080
-# mount, umount2, pivot_root, unshare, setns, ptrace, process_vm_readv/writev,
-# socket family, io_uring, module loading, bpf, perf, userfaultfd, clone3,
-# open_by_handle_at.
+_WORK_BYTES = 2 * 1024 * 1024
+_TMP_BYTES = 4 * 1024 * 1024
+_DEV_BYTES = 1 * 1024 * 1024
+# mount, umount2, pivot_root, the new mount API, unshare, setns, ptrace,
+# process_vm_readv/writev, socket family, io_uring, module loading, bpf, perf,
+# userfaultfd, clone3, open_by_handle_at, pidfd_getfd, keyring, memfd, landlock,
+# syslog, reboot, swap, and uid changes. Capabilities are also dropped; this
+# list is defense in depth, not a full allowlist.
 _BLOCKED = (
     165,
     166,
@@ -78,6 +86,29 @@ _BLOCKED = (
     298,
     323,
     435,
+    428,
+    429,
+    430,
+    431,
+    432,
+    442,
+    438,
+    444,
+    445,
+    446,
+    319,
+    103,
+    167,
+    168,
+    169,
+    248,
+    249,
+    250,
+    312,
+    105,
+    106,
+    117,
+    119,
 )
 
 libc = ctypes.CDLL(None, use_errno=True)
@@ -133,13 +164,22 @@ def _setup_root(work: str, newroot: str) -> None:
         if not os.path.lexists(path):
             os.symlink(target, path)
     _mount("proc", f"{newroot}/proc", "proc", MS_NOSUID | MS_NODEV | MS_NOEXEC)
-    _mount("tmpfs", f"{newroot}/tmp", "tmpfs", MS_NOSUID | MS_NODEV, "size=32m,mode=700")
-    _mount("tmpfs", f"{newroot}/dev", "tmpfs", MS_NOSUID | MS_NOEXEC, "size=1m,mode=755")
+    _mount("tmpfs", f"{newroot}/tmp", "tmpfs", MS_NOSUID | MS_NODEV, f"size={_TMP_BYTES},mode=700")
+    _mount("tmpfs", f"{newroot}/dev", "tmpfs", MS_NOSUID | MS_NOEXEC, f"size={_DEV_BYTES},mode=755")
     for node in ("null", "zero", "full", "urandom"):
         destination = f"{newroot}/dev/{node}"
         open(destination, "a", encoding="utf-8").close()
         _mount(f"/dev/{node}", destination, None, MS_BIND)
-    _mount(work, f"{newroot}/work", None, MS_BIND)
+    # /work is a size-capped tmpfs, not a bind of the host directory.
+    _mount("tmpfs", f"{newroot}/work", "tmpfs", MS_NOSUID | MS_NODEV, f"size={_WORK_BYTES},mode=700")
+    for name in ("inner.py", "candidate.py", "runtime_failure.txt"):
+        source = os.path.join(work, name)
+        if name == "runtime_failure.txt" and not os.path.exists(source):
+            continue
+        target = f"{newroot}/work/{name}"
+        with open(source, "rb") as incoming, open(target, "wb") as outgoing:
+            outgoing.write(incoming.read())
+        os.chmod(target, 0o644)
     os.chdir(newroot)
     if libc.pivot_root(b".", b"oldroot") != 0:
         raise _os_error("pivot_root")
@@ -161,12 +201,16 @@ def _set_limits(cpu_seconds: int) -> None:
 
     limit(resource.RLIMIT_CPU, cpu_seconds)
     limit(resource.RLIMIT_AS, 1024 * 1024 * 1024)
-    limit(resource.RLIMIT_FSIZE, 2 * 1024 * 1024)
+    # Per-file backstop. The aggregate cap is the tmpfs sizes, which a second
+    # file under this rlimit can still exhaust.
+    limit(resource.RLIMIT_FSIZE, _WORK_BYTES)
     limit(resource.RLIMIT_CORE, 0)
     limit(resource.RLIMIT_NOFILE, 256)
-    # RLIMIT_NPROC counts every thread of this host uid, so a small ceiling
-    # would fail closed for reasons that have nothing to do with the candidate.
-    # Child processes stay inside this pid, mount, and network namespace.
+    # RLIMIT_NPROC is intentionally unset. It is accounted for the whole host
+    # uid (this environment's ceiling is in the tens of thousands) and would
+    # not stop a fork bomb inside the sandbox. The worker denies clone instead.
+    # Creating a child cgroup for pids.max is not available: /sys/fs/cgroup is
+    # not writable from this process.
 
 
 def _seccomp_program() -> ctypes.Structure:

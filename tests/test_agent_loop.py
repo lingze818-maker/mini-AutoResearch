@@ -133,7 +133,14 @@ def test_pass_still_stops_and_failures_do_not_drop_later_candidates(tmp_path):
     assert document["results"][0]["decision"] == "failure"
     assert document["results"][1]["decision"] == "pass"
     locked = json.loads((demo / "candidates_locked.json").read_text(encoding="utf-8"))
-    assert locked["oos_evaluated"] is False
+    assert locked["phase"] == "locked_before_oos"
+    assert locked["oos_evaluated_at_lock"] is False
+    assert "oos_evaluated" not in locked
+    state = json.loads((demo / "evaluation_state.json").read_text(encoding="utf-8"))
+    assert state["phase"] == "oos_disclosed"
+    assert state["oos_evaluated"] is True
+    assert state["oos_disclosed"] is True
+    assert state["model_calls_after_oos"] == 0
     assert "def generate(bars)\n" in locked["candidates"][0]["source"]
     assert (demo / "sentinel_host_only.txt").read_text(encoding="utf-8") == "HOST-SENTINEL-UNCHANGED\n"
     assert OFFLINE_BANNER in (demo / "summary.json").read_text(encoding="utf-8")
@@ -231,7 +238,14 @@ def test_committed_offline_demo_records_the_stop_and_the_sentinel():
     assert statuses["unauthorized_read"] != "ok"
     assert statuses["unauthorized_write"] != "ok"
     locked = json.loads((demo / "candidates_locked.json").read_text(encoding="utf-8"))
-    assert locked["oos_evaluated"] is False
+    assert locked["phase"] == "locked_before_oos"
+    assert locked["oos_evaluated_at_lock"] is False
+    assert "oos_evaluated" not in locked
+    state = json.loads((demo / "evaluation_state.json").read_text(encoding="utf-8"))
+    assert state["phase"] == "oos_disclosed"
+    assert state["oos_evaluated"] is True
+    assert state["oos_disclosed"] is True
+    assert state["model_calls_after_oos"] == 0
     assert [item["id"] for item in locked["candidates"]] == ["momentum_20", "volatility_20", "momentum_60"]
     assert "def generate" in locked["candidates"][0]["source"]
 

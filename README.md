@@ -117,7 +117,7 @@ PYTHONPATH=src python -m agent --demo --rerun
 
 `--rerun` 只删除并重写 `reports/agent_demo/`。不带 `--rerun` 时，目录已经存在就退出，原来的文件不动。两条路都不会写 `reports/baseline/`。输出里有锁定的候选定义、失败探针、每只标的的指标和判定、净值曲线，以及停止原因。
 
-这一轮只做一次：用样本内摘要提出 3 个预设候选，先把定义写进 `candidates_locked.json`（`oos_evaluated` 为 false），再跑沙箱和回测。样本外判定一旦写出来就停止，`stop.reason` 是 `oos_verdict_disclosed`，provider 只调用一次。判定来自 `judge`，模型不能改。没有用样本外结果做第二轮提案或搜参数。
+这一轮只做一次：用样本内摘要提出 3 个预设候选，先把定义写进 `candidates_locked.json`，再跑沙箱和回测。这个锁定文件是评估前的快照：`phase` 是 `locked_before_oos`，`oos_evaluated_at_lock` 是 false。它写完就不再改，所以它旁边的 `results.json` 不能拿这个字段当成「现在还没看样本外」。最终状态在 `evaluation_state.json`：样本外已经评估并披露时，`phase` 是 `oos_disclosed`，`oos_evaluated` 和 `oos_disclosed` 都是 true。`stop.reason` 是 `oos_verdict_disclosed`，provider 只调用一次。判定来自 `judge`，模型不能改。没有用样本外结果做第二轮提案或搜参数。
 
 候选是因果的 `generate(bars)`。沙箱里的 worker 每次只收到当前 bar 和更早的 bar，再要下一根之前必须先交回这一根的布尔信号。`shift(-1)` 在当前前缀的最后一行上拿不到未来价格。宿主不 import、不 exec 生成代码，只检查信号长度、对齐和布尔类型，然后交给原来的 `run_backtest`。成交仍然是信号用当日收盘、下一根 bar 的收盘成交，手续费仍是 0。
 
@@ -141,7 +141,19 @@ PYTHONPATH=src python -m agent --demo --rerun
 
 隔离用的是 Linux 的 user、mount、pid、net、ipc、uts namespace。子进程把自己映射成该命名空间里的 root，`pivot_root` 到一个新根，再丢掉 capabilities，打开 `no_new_privs`，并装上 seccomp。新根只有只读的 `/usr`、新的 procfs、`null/zero/full/urandom`、一块 tmpfs，以及只放了 helper 和候选源码的工作目录。不挂载仓库、`data/`、配置、judge、凭证或宿主套接字。环境变量换成一份固定的小名单，不继承宿主环境。
 
-候选代码只在这个进程里由 helper 加载。宿主读回 JSON 信号。墙钟默认 60 秒，CPU rlimit 比墙钟多几秒，地址空间 1 GiB，单文件写入 2 MiB，标准输出最多 1 MB。任一候选失败都记成结构化记录，下一只候选继续。
+候选代码只在 worker 里由 helper 加载。宿主读回 JSON 信号；helper 以非 0 退出时，如果标准输出里有结构化原因，宿主保留这段原因，而不是改写成笼统的 `sandbox setup failed`。墙钟默认 60 秒，超时会杀掉整个进程组。CPU rlimit 比墙钟多几秒，地址空间 1 GiB，标准输出最多 1 MB。任一候选失败都记成结构化记录，下一只候选继续。
+
+可写空间全部是 tmpfs，没有把宿主目录绑进沙箱：
+
+| 挂载 | 大小 | 作用 |
+| --- | --- | --- |
+| `/work` | 2 MiB | helper、候选源码，以及候选自己的写入 |
+| `/tmp` | 4 MiB | 临时文件 |
+| `/dev` | 1 MiB | `null`、`zero`、`full`、`urandom` |
+
+三者合计 7 MiB。`RLIMIT_FSIZE` 也是 2 MiB，但它只限制单个文件；两个各自小于 2 MiB 的文件仍然会把 `/work` 写满并得到 `ENOSPC`。候选写不进宿主磁盘。
+
+进程和线程：bootstrap 的 seccomp 仍允许一次普通 `clone`，这样受信任的 supervisor 能拉起唯一的 worker，pandas 也能在导入时完成初始化。worker 导入 pandas 之后再叠一层过滤器，拒绝 `clone`、`fork`、`vfork`、`clone3` 和 `execve`。候选因此不能再起进程或线程。这里没有用 `RLIMIT_NPROC`：它按宿主 uid 计数，设成 64 也不会生效（本环境的上限是 63994）。`/sys/fs/cgroup` 不可写，所以也没有 cgroup `pids.max`。墙钟杀死的是整个进程组，包括已经存在的子进程。
 
 下面任一条件不满足时，结果是 `isolation_unavailable`，候选不会在宿主上补跑：
 
@@ -151,22 +163,22 @@ PYTHONPATH=src python -m agent --demo --rerun
 - 沙箱根目录上能看见宿主路径
 - seccomp 没有挡住 `socket()`
 
-依赖要能被沙箱里的 `/usr/bin/python3` import。pandas 需要装在这棵只读的 `/usr` 下面，例如 `/usr/local`。仓库里的 virtualenv 不会被挂进去。沙箱里 import 失败同样是 `isolation_unavailable`，不会改到宿主进程里执行。
+依赖要能被沙箱里的 `/usr/bin/python3` import。可用的装法是把 manylinux wheel 装进只读的 `/usr`，例如 `python3 -m pip install --prefix /usr/local`。这种 wheel 自带 OpenBLAS，不经过 `/etc/alternatives`。发行版的 `libblas.so.3` 是指向 `/etc/alternatives` 的符号链接；沙箱不挂载 `/etc`，所以这条链接打不开。失败时状态是 `isolation_unavailable`，细节会写成 `missing runtime library: ...`，包含缺的库名。不要为了修 import 去挂载宿主 `/etc` 或仓库里的 virtualenv。沙箱里 import 失败不会改到宿主进程里执行。
 
 这次环境里上述检查是实际跑过的，不是跳过的。`PYTHONPATH=src python -m pytest` 里的 `tests/test_agent_sandbox.py` 覆盖了正常策略、未来价格扰动、语法错误、超时、哨兵读写、本机监听端口收不到连接、子进程、畸形输出、环境变量不继承，以及隔离启动失败时不在宿主执行。没有 skip。`failures.json` 是同一次演示命令里再次执行这些探针的记录。
 
 实际边界比「不能访问宿主」更窄，限制也要写清楚：
 
 - `/usr` 对候选是只读可见的，这样才能跑解释器和 pandas。候选读得到 `/usr` 里宿主用户本来就能读的文件，写会被只读挂载拒绝。
-- seccomp 是拒绝名单（网络、mount、namespace、ptrace、io_uring、模块加载；worker 里再拒绝 execve），不是完整的 syscall 白名单。没点名的 syscall 仍然允许。
-- 命名空间里仍可以 `fork`。子进程继承同一套 namespace 和 seccomp，`execve` 在 worker 里会被拒绝，所以 `subprocess` 起不来新程序。
-- 资源限制是 rlimit 加墙钟杀掉进程，不是 cgroup。没有把 `RLIMIT_NPROC` 设得很小，因为它按宿主 uid 计数，会把无关进程算进去。
+- seccomp 是拒绝名单，不是完整的 syscall 白名单。bootstrap 拒绝网络、`mount`/`umount2`/`pivot_root`、新挂载接口（`open_tree`、`move_mount`、`fsopen`、`fsconfig`、`fsmount`、`mount_setattr`）、`unshare`/`setns`、ptrace、`process_vm_readv`、`pidfd_getfd`、io_uring、内核模块、bpf、perf、userfaultfd、keyring、`memfd_create`、landlock、syslog、reboot、swap，以及 `setuid` 一族。worker 在导入 pandas 之后再拒绝 `execve`、全部 `clone`/`fork`/`clone3` 和 `capset`。没点名的 syscall 仍然允许。capabilities 已经丢掉，所以上面有些调用本来也会因权限失败；写进过滤器是为了不单靠这一点。
+- 候选不能再 `fork` 或起线程。`subprocess` 同时过不了 `execve`。
+- 资源限制是 rlimit、tmpfs 大小和墙钟，不是 cgroup。cgroup 文件系统在这里不可写。
 - 沙箱里的 root 映射回宿主上的当前用户，再丢掉 capabilities。这不是宿主上的另一个 uid。
 - 新的 procfs 看不到其他宿主进程，但 `/proc` 里的内核接口还在。
 
 ### 模型
 
-计划中的在线接口是 DeepSeek 的 tool calling，请求形状按常见的 chat-completions 来写，**没有对真实账号验证过**。模型名只从环境变量 `DEEPSEEK_MODEL` 读，程序不内置一个当前模型 id。默认基址是 `https://api.deepseek.com`，可用 `DEEPSEEK_BASE_URL` 改。路径 `/chat/completions` 是未验证的假设。
+计划中的在线接口是 DeepSeek 的 tool calling，请求形状按常见的 chat-completions 来写，**没有对真实账号验证过**。模型名只从环境变量 `DEEPSEEK_MODEL` 读，程序不内置一个当前模型 id。凭证只发到 `https://api.deepseek.com/chat/completions`。`DEEPSEEK_BASE_URL` 只有在它就是这个 HTTPS 源站时才接受：拒绝 http、别的主机、`127.0.0.1`、用户名密码、非 443 端口、路径、query，以及重定向。重定向不会带着 Authorization 跟过去。路径是未验证的假设，不是一份已核对的现行 API 说明。
 
 在线模式必须显式加上 `--live`。密钥只读 `DEEPSEEK_API_KEY`。缺密钥或缺模型名时直接失败，**不会退回离线夹具**。调用次数最多 2 轮，每轮最多再重试 1 次，`max_tokens` 2048，单次超时 30 秒。工具只有样本内摘要、提交候选，以及两个宿主专用占位：回测和写报告。后两个对模型只返回拒绝，不给路径、不给样本外结果、不让模型写判定。回复和参数都会做校验。异常文本里不放 Authorization 头。
 

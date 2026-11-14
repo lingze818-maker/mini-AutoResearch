@@ -5,18 +5,21 @@ private work directory, starts ``isolate.py``, and reads back a JSON signal
 list. Those booleans are later replayed by the existing vectorbt runner.
 
 Isolation is a new user, mount, pid, network, ipc, and uts namespace. The
-sandboxed root is a fresh tree: read-only ``/usr`` (the interpreter and
-libraries), a fresh procfs, a tiny devtmpfs, a private tmpfs, and the work
-directory. The repository, data directory, config, judge, credentials, and
-host sockets are not mounted. Capabilities are dropped, ``no_new_privs`` is
-set, and a seccomp filter blocks network, mount, namespace, ptrace, and
-io_uring calls. The worker then blocks ``execve``.
+sandboxed root is a fresh tree: read-only ``/usr``, a fresh procfs, and three
+tmpfs mounts (``/work``, ``/tmp``, ``/dev``). ``/work`` is not a bind of the
+host directory. The repository, data directory, config, judge, credentials,
+``/etc``, and host sockets are not mounted. Capabilities are dropped,
+``no_new_privs`` is set, and a seccomp denylist blocks network, mount,
+namespace, ptrace, and related calls. After pandas is imported, the worker
+also denies ``execve`` and every ``clone``/``fork``/``clone3``, so the
+candidate cannot start a process or thread.
 
-This is not a full syscall allowlist. ``/usr`` remains readable. Ordinary
-child processes are allowed and stay inside the same namespaces. Limits are
-rlimits plus a wall-clock kill, not a cgroup. If the namespace, the read-only
-remount, or the seccomp self-check is unavailable, the result is
-``isolation_unavailable`` and the candidate is not run on the host.
+This is not a full syscall allowlist. ``/usr`` remains readable. ``RLIMIT_NPROC``
+is not used, and a cgroup pids limit is not available here. Writable bytes are
+the sum of the tmpfs sizes. A wall-clock kill covers the process group. If
+isolation or the runtime libraries are unavailable, the result is
+``isolation_unavailable`` with the helper's detail, and the candidate is not
+run on the host.
 """
 
 from __future__ import annotations
@@ -39,6 +42,7 @@ from pathlib import Path
 import pandas as pd
 
 from agent.limits import (
+    AGGREGATE_WRITABLE_BYTES,
     DEFAULT_TIMEOUT_S,
     FILE_BYTES,
     MAX_BARS,
@@ -244,40 +248,52 @@ def _bool_list(value: object, length: int) -> tuple[bool, ...] | None:
     return tuple(items)
 
 
+def _json_object(raw: bytes) -> dict | None:
+    text = raw.decode("utf-8", errors="replace").strip()
+    if not text:
+        return None
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
 def _interpret(returncode: int, stdout: bytes, stderr: bytes, timed_out: bool, overflow: bool, length: int, elapsed_ms: int) -> SandboxOutcome:
     if timed_out:
         return _outcome("timeout", "wall clock limit exceeded", elapsed_ms=elapsed_ms)
     if overflow:
         return _outcome("output_limit", "sandbox output exceeded the byte limit", elapsed_ms=elapsed_ms)
-    text = stdout.decode("utf-8", errors="replace").strip()
-    payload = None
-    if text:
-        try:
-            payload = json.loads(text)
-        except json.JSONDecodeError:
-            payload = None
-    if returncode != 0 or not isinstance(payload, dict):
+    payload = _json_object(stdout)
+    if payload is not None:
+        status = payload.get("status")
+        detail = payload.get("detail") if isinstance(payload.get("detail"), str) else ""
+        if payload.get("ok") is True and status == "ok" and returncode == 0:
+            entries = _bool_list(payload.get("entries"), length)
+            exits = _bool_list(payload.get("exits"), length)
+            if entries is None or exits is None:
+                return _outcome("malformed_output", "signals must be boolean lists aligned to the bars", elapsed_ms=elapsed_ms)
+            return SandboxOutcome(True, "ok", "", entries, exits, elapsed_ms)
+        if isinstance(status, str) and status in _STATUSES and status != "ok":
+            # A non-zero exit still carries the helper's structured reason.
+            # Exit 96 used to be collapsed to "sandbox setup failed".
+            return _outcome(status, detail or status, elapsed_ms=elapsed_ms)
+    if returncode != 0:
         detail = stderr.decode("utf-8", errors="replace").strip()
         if returncode < 0:
             return _outcome("resource_limit", detail or f"sandbox process died from signal {-returncode}", elapsed_ms=elapsed_ms)
         snippet = " ".join(detail.split())[:300]
         return _outcome("isolation_unavailable", snippet or "sandbox setup failed", elapsed_ms=elapsed_ms)
-    status = payload.get("status")
-    if not isinstance(status, str) or status not in _STATUSES:
-        return _outcome("malformed_output", "sandbox status is missing", elapsed_ms=elapsed_ms)
-    detail = payload.get("detail") if isinstance(payload.get("detail"), str) else ""
-    if payload.get("ok") is True and status == "ok":
-        entries = _bool_list(payload.get("entries"), length)
-        exits = _bool_list(payload.get("exits"), length)
-        if entries is None or exits is None:
-            return _outcome("malformed_output", "signals must be boolean lists aligned to the bars", elapsed_ms=elapsed_ms)
-        return SandboxOutcome(True, "ok", "", entries, exits, elapsed_ms)
-    if status == "ok":
-        return _outcome("malformed_output", "sandbox marked ok without a successful payload", elapsed_ms=elapsed_ms)
-    return _outcome(status, detail or status, elapsed_ms=elapsed_ms)
+    return _outcome("malformed_output", "sandbox status is missing", elapsed_ms=elapsed_ms)
 
 
-def run_candidate(source: str, bars: pd.DataFrame, *, timeout_s: float = DEFAULT_TIMEOUT_S) -> SandboxOutcome:
+def run_candidate(
+    source: str,
+    bars: pd.DataFrame,
+    *,
+    timeout_s: float = DEFAULT_TIMEOUT_S,
+    _runtime_failure: str | None = None,
+) -> SandboxOutcome:
     """Execute ``source`` inside the sandbox. Never falls back to the host."""
     rejected = _reject_input(source, bars, timeout_s)
     if rejected is not None:
@@ -300,6 +316,11 @@ def run_candidate(source: str, bars: pd.DataFrame, *, timeout_s: float = DEFAULT
         os.makedirs(newroot, mode=0o700)
         shutil.copyfile(_INNER, os.path.join(work, "inner.py"))
         Path(os.path.join(work, "candidate.py")).write_text(source, encoding="utf-8")
+        if _runtime_failure is not None:
+            note = " ".join(str(_runtime_failure).split())[:200]
+            if not note:
+                return _outcome("rejected_input", "runtime failure note is empty")
+            Path(os.path.join(work, "runtime_failure.txt")).write_text(note + "\n", encoding="utf-8")
         cpu_seconds = max(1, min(180, int(math.ceil(float(timeout_s))) + 5))
         command = [sys.executable, str(_ISOLATE), work, newroot, str(cpu_seconds)]
         try:
@@ -315,3 +336,4 @@ def run_candidate(source: str, bars: pd.DataFrame, *, timeout_s: float = DEFAULT
 # Re-export the memory constant so operators can see the enforced ceiling.
 SANDBOX_MEMORY_BYTES = MEMORY_BYTES
 SANDBOX_FILE_BYTES = FILE_BYTES
+SANDBOX_AGGREGATE_WRITABLE_BYTES = AGGREGATE_WRITABLE_BYTES

@@ -14,6 +14,16 @@
     "provider_calls": 1,
     "model_calls_after_oos": 0
   },
+  "evaluation_state": {
+    "phase": "oos_disclosed",
+    "oos_evaluated": true,
+    "oos_disclosed": true,
+    "stop_reason": "oos_verdict_disclosed",
+    "provider_calls": 1,
+    "model_calls_after_oos": 0,
+    "lock_file": "candidates_locked.json",
+    "lock_note": "candidates_locked.json is the immutable pre-evaluation snapshot. oos_evaluated_at_lock false means that snapshot was sealed before any out-of-sample result. It is not the final status."
+  },
   "sentinel": {
     "sha256_before": "d8d338329495c982dfaeb8d0c040076aaf48d7438ab1d33ae0ef7d4080ba35d3",
     "sha256_after": "d8d338329495c982dfaeb8d0c040076aaf48d7438ab1d33ae0ef7d4080ba35d3",
@@ -22,7 +32,9 @@
   "sandbox": {
     "mechanism": "linux user, mount, pid, net, ipc, and uts namespaces with pivot_root, dropped capabilities, and seccomp",
     "fail_closed": true,
-    "candidate_execution": "isolated helper only; the host replays validated booleans through vectorbt"
+    "candidate_execution": "isolated helper only; the host replays validated booleans through vectorbt",
+    "process_creation": "denied in the worker after pandas import; cgroup pids controller is not writable",
+    "writable_storage": "tmpfs only; /work is not a host bind"
   },
   "candidate_ids": [
     "momentum_20",

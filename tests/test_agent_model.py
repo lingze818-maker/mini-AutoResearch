@@ -10,7 +10,9 @@ from agent.model import (
     LiveConfigError,
     LiveDeepSeekProvider,
     ModelError,
+    _RefuseRedirect,
     build_provider,
+    official_completions_url,
     proposal_tool_specs,
 )
 from agent.offline import OfflineFixtureProvider
@@ -256,6 +258,39 @@ def test_summary_tool_does_not_accept_an_out_of_sample_payload():
     poisoned["510300"] = {**poisoned["510300"], "out_of_sample": {"period_return": 1}}
     with pytest.raises(ModelError, match="out-of-sample"):
         provider.propose(poisoned)
+
+
+def test_only_the_official_https_origin_can_receive_the_credential():
+    assert official_completions_url("https://api.deepseek.com") == "https://api.deepseek.com/chat/completions"
+    assert official_completions_url("https://API.DEEPSEEK.COM") == "https://api.deepseek.com/chat/completions"
+    rejected = [
+        "http://api.deepseek.com",
+        "http://127.0.0.1",
+        "https://127.0.0.1",
+        "https://api.deepseek.com.evil.com",
+        "https://evil.com",
+        "https://user:pass@api.deepseek.com",
+        "https://api.deepseek.com@evil.com",
+        "https://api.deepseek.com:8443",
+        "https://api.deepseek.com/other",
+        "https://api.deepseek.com?x=1",
+        " https://api.deepseek.com",
+    ]
+    for base in rejected:
+        with pytest.raises(ModelError):
+            official_completions_url(base)
+
+    def transport(*_args):
+        raise AssertionError("credential was sent")
+
+    with pytest.raises(ModelError):
+        LiveDeepSeekProvider(api_key=_KEY, model="configured-by-operator", base_url="http://127.0.0.1", transport=transport)
+
+
+def test_redirects_are_not_followed_with_the_credential():
+    handler = _RefuseRedirect()
+    with pytest.raises(ModelError, match="redirect"):
+        handler.redirect_request(None, None, 302, "Found", {}, "http://127.0.0.1/steal")
 
 
 def test_source_does_not_hardcode_a_model_id():

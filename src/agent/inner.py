@@ -78,8 +78,20 @@ def _nondumpable() -> None:
         _fail("isolation_unavailable", "PR_SET_DUMPABLE failed", 96)
 
 
-def _block_exec() -> None:
-    """Stack a filter that refuses execve. The worker has already started."""
+def _runtime_detail(exc: BaseException) -> str:
+    text = _short(exc)
+    lowered = text.lower()
+    if any(marker in lowered for marker in ("libblas", "liblapack", "libgfortran", "shared object", ".so")):
+        return ("missing runtime library: " + text)[:400]
+    return text
+
+
+def _block_new_processes() -> None:
+    """Deny exec and every way to create a process or thread.
+
+    The worker calls this only after pandas has been imported. The supervisor
+    calls it after its one trusted fork. A stacked filter cannot be removed.
+    """
     import struct
 
     pr_set_seccomp = 22
@@ -103,8 +115,8 @@ def _block_exec() -> None:
     def jump(k: int, jt: int, jf: int) -> bytes:
         return struct.pack("<HBBI", bpf_jmp | bpf_jeq | bpf_k, jt, jf, k & 0xFFFFFFFF)
 
-    # execve=59, execveat=322
-    blocked = (59, 322)
+    # execve, execveat, clone, fork, vfork, clone3, capset.
+    blocked = (59, 322, 56, 57, 58, 435, 126)
     blob = b""
     blob += stmt(bpf_ld | bpf_w | bpf_abs, 4)
     blob += jump(audit_arch, 1, 0)
@@ -132,7 +144,7 @@ def _block_exec() -> None:
     libc = ctypes.CDLL(None, use_errno=True)
     if libc.prctl(pr_set_seccomp, seccomp_mode_filter, ctypes.byref(program)) != 0:
         error = ctypes.get_errno()
-        _fail("isolation_unavailable", f"could not block exec: {os.strerror(error)}", 96)
+        _fail("isolation_unavailable", f"could not block process creation: {os.strerror(error)}", 96)
 
 
 def _as_bool(value: object, name: str) -> bool:
@@ -184,11 +196,22 @@ class _Lines:
 def worker() -> None:
     _assert_sandbox()
     _nondumpable()
+    failure_path = "/work/runtime_failure.txt"
+    if os.path.exists(failure_path):
+        detail = open(failure_path, encoding="utf-8").read().strip()[:200]
+        _emit(
+            {
+                "ok": False,
+                "status": "isolation_unavailable",
+                "detail": "missing runtime library: " + (detail or "runtime library failed to load"),
+            },
+            96,
+        )
     try:
         import pandas as pd
     except Exception as exc:
-        _emit({"ok": False, "status": "isolation_unavailable", "detail": _short(exc)}, 96)
-    _block_exec()
+        _emit({"ok": False, "status": "isolation_unavailable", "detail": _runtime_detail(exc)}, 96)
+    _block_new_processes()
     import importlib.util
 
     try:
@@ -258,6 +281,7 @@ def supervisor() -> None:
         os._exit(127)
     os.close(to_read)
     os.close(from_write)
+    _block_new_processes()
     raw = sys.stdin.buffer.read(MAX_STDIN)
     if len(raw) >= MAX_STDIN:
         _fail("rejected_input", "bar payload is too large", 0)

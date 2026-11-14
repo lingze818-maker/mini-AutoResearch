@@ -6,7 +6,17 @@ import sys
 import threading
 from pathlib import Path
 
-from agent.sandbox import replay_strategy, run_candidate
+import json
+
+from agent.limits import (
+    AGGREGATE_WRITABLE_BYTES,
+    DEV_TMPFS_BYTES,
+    FILE_BYTES,
+    TMP_TMPFS_BYTES,
+    WORK_TMPFS_BYTES,
+)
+from agent.sandbox import _interpret, replay_strategy, run_candidate
+import agent.isolate as isolate_module
 from backtest.runner import run_backtest
 from tests.conftest import ROOT, bars_from_closes
 
@@ -278,6 +288,116 @@ def test_replay_uses_the_existing_runner_and_next_bar_fill(monkeypatch):
     assert seen["fees"] == 0.0
     assert seen["entries"][0] is False or seen["entries"][0] == False
     assert result.curve["position"].tolist()[2:] == [1, 1, 1]
+
+
+def test_tmpfs_ceilings_match_and_cover_the_per_file_rlimit():
+    assert isolate_module._WORK_BYTES == WORK_TMPFS_BYTES == FILE_BYTES
+    assert isolate_module._TMP_BYTES == TMP_TMPFS_BYTES
+    assert isolate_module._DEV_BYTES == DEV_TMPFS_BYTES
+    assert WORK_TMPFS_BYTES + TMP_TMPFS_BYTES + DEV_TMPFS_BYTES == AGGREGATE_WRITABLE_BYTES
+    assert "RLIMIT_NPROC" not in isolate_module._set_limits.__code__.co_names
+
+
+def test_work_is_a_capped_tmpfs_and_two_files_cannot_fill_the_host_disk():
+    source = (
+        "def generate(bars):\n"
+        "    mounts = open('/proc/mounts', encoding='utf-8').read().splitlines()\n"
+        "    work = [line for line in mounts if len(line.split()) >= 2 and line.split()[1] == '/work']\n"
+        "    if not work or not work[0].startswith('tmpfs '):\n"
+        "        raise RuntimeError('work_not_tmpfs')\n"
+        "    if 'size=2048k' not in work[0].split()[3]:\n"
+        "        raise RuntimeError('work_size_missing')\n"
+        "    blob = b'x' * (1536 * 1024)\n"
+        "    with open('/work/a.bin', 'wb') as handle:\n"
+        "        handle.write(blob)\n"
+        "    try:\n"
+        "        with open('/work/b.bin', 'wb') as handle:\n"
+        "            handle.write(blob)\n"
+        "    except OSError as exc:\n"
+        "        if exc.errno != 28:\n"
+        "            raise\n"
+        "        raise RuntimeError('aggregate_capped')\n"
+        "    raise RuntimeError('second_write_succeeded')\n"
+    )
+    outcome = run_candidate(source, bars_from_closes([100, 101, 102, 103]), timeout_s=20)
+    assert outcome.status == "runtime_error"
+    assert "aggregate_capped" in outcome.detail
+    assert "second_write_succeeded" not in outcome.detail
+    assert "work_not_tmpfs" not in outcome.detail
+
+
+def test_candidate_cannot_fork_or_start_a_thread_after_pandas_import():
+    source = (
+        "def generate(bars):\n"
+        "    import os\n"
+        "    import threading\n"
+        "    close = bars['close'].astype(float)\n"
+        "    if len(close) > 1:\n"
+        "        float(close.pct_change().iloc[1:].std())\n"
+        "    try:\n"
+        "        pid = os.fork()\n"
+        "    except OSError as exc:\n"
+        "        if exc.errno != 1:\n"
+        "            raise\n"
+        "    else:\n"
+        "        if pid == 0:\n"
+        "            os._exit(0)\n"
+        "        raise RuntimeError('fork_succeeded')\n"
+        "    try:\n"
+        "        threading.Thread(target=lambda: None).start()\n"
+        "    except RuntimeError as exc:\n"
+        "        if 'thread' not in str(exc):\n"
+        "            raise\n"
+        "    else:\n"
+        "        raise RuntimeError('thread_succeeded')\n"
+        "    return {'entry': False, 'exit': False}\n"
+    )
+    outcome = run_candidate(source, bars_from_closes([100, 101, 102, 103]), timeout_s=20)
+    assert outcome.ok, outcome.detail
+    assert "fork_succeeded" not in outcome.detail
+    assert "thread_succeeded" not in outcome.detail
+
+
+def test_exit_96_keeps_the_missing_library_detail():
+    raw = json.dumps(
+        {
+            "ok": False,
+            "status": "isolation_unavailable",
+            "detail": "missing runtime library: libblas.so.3: cannot open shared object file",
+        }
+    ).encode("utf-8")
+    outcome = _interpret(96, raw, b"namespace setup failed: ignored", False, False, 4, 12)
+    assert outcome.status == "isolation_unavailable"
+    assert "libblas.so.3" in outcome.detail
+    assert "sandbox setup failed" not in outcome.detail
+    assert "ignored" not in outcome.detail
+
+
+def test_injected_runtime_failure_is_reported_from_the_real_sandbox():
+    outcome = run_candidate(
+        "def generate(bars):\n    return {'entry': False, 'exit': False}\n",
+        bars_from_closes([100, 101, 102, 103]),
+        timeout_s=20,
+        _runtime_failure="libblas.so.3: cannot open shared object file: No such file or directory",
+    )
+    assert outcome.status == "isolation_unavailable"
+    assert "missing runtime library" in outcome.detail
+    assert "libblas.so.3" in outcome.detail
+    assert outcome.detail != "sandbox setup failed"
+    assert outcome.entries == ()
+
+
+def test_distro_libblas_symlink_fails_without_mounting_etc():
+    source = (
+        "def generate(bars):\n"
+        "    import ctypes\n"
+        "    ctypes.CDLL('/usr/lib/x86_64-linux-gnu/libblas.so.3')\n"
+        "    return {'entry': False, 'exit': False}\n"
+    )
+    outcome = run_candidate(source, bars_from_closes([100, 101, 102, 103]), timeout_s=20)
+    assert not outcome.ok
+    assert outcome.detail != "sandbox setup failed"
+    assert "libblas" in outcome.detail.lower() or "No such file" in outcome.detail
 
 
 def test_environment_keys_are_not_passed_to_the_child(monkeypatch):

@@ -1,6 +1,7 @@
 {
   "locked": true,
-  "oos_evaluated": false,
+  "phase": "locked_before_oos",
+  "oos_evaluated_at_lock": false,
   "banner": "offline simulated proposal, not a real model research run",
   "candidates": [
     {
