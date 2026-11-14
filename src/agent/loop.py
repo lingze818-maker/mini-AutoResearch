@@ -234,7 +234,7 @@ def _document(proposal, failures, results, *, stop_reason, sentinel_before, sent
             "fail_closed": True,
             "candidate_execution": "isolated helper only; the host replays validated booleans through vectorbt",
             "process_creation": "denied in the worker after pandas import; cgroup pids controller is not writable",
-            "writable_storage": "tmpfs only; /work is not a host bind",
+            "writable_storage": "root is a read-only tmpfs; only /work, /tmp, and /dev are writable tmpfs",
         },
     }
 

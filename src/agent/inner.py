@@ -10,10 +10,16 @@ from __future__ import annotations
 import ctypes
 import json
 import os
+import re
 import sys
 
-ALLOWED_ROOT = {"bin", "dev", "lib", "lib64", "proc", "tmp", "usr", "work"}
+ALLOWED_ROOT = {"bin", "dev", "lib", "lib64", "payload", "proc", "tmp", "usr", "work"}
 _MAX_LINE = 8000
+_WRITABLE_TMPFS = {"/work": "2048k", "/tmp": "4096k", "/dev": "1024k"}
+_DEVICE_MOUNTS = {"/dev/null", "/dev/zero", "/dev/full", "/dev/urandom"}
+_SECRET_BEARER = re.compile(r"(?i)bearer\s+\S+")
+_SECRET_KEY = re.compile(r"(?i)(api[_-]?key|authorization)\s*[:=]\s*\S+")
+_SECRET_TOKEN = re.compile(r"sk-[A-Za-z0-9_-]{6,}")
 
 
 def _emit(payload: dict, code: int) -> None:
@@ -35,32 +41,63 @@ def _status_value(name: str) -> str:
     return ""
 
 
+def _assert_mounts(lines: list[str]) -> None:
+    """Refuse to run a candidate unless every visible mount is accounted for.
+
+    `/` must be a read-only tmpfs. Host filesystems such as ext4 are rejected
+    even if someone marked them read-only. Writable directories are only the
+    sized tmpfs mounts listed above.
+    """
+    seen: set[str] = set()
+    problems: list[str] = []
+    for line in lines:
+        parts = line.split()
+        if len(parts) < 4:
+            continue
+        source, target, fstype, option_text = parts[0], parts[1], parts[2], parts[3]
+        options = set(option_text.split(","))
+        seen.add(target)
+        writable = "rw" in options
+        if target == "/":
+            if fstype != "tmpfs" or writable or "ro" not in options:
+                problems.append(f"root is {source} {fstype} {option_text}")
+        elif target == "/usr" or target.startswith("/usr/"):
+            if writable or "ro" not in options:
+                problems.append(f"{target} is writable")
+        elif target == "/proc" or target.startswith("/proc/"):
+            if fstype != "proc" or writable or "ro" not in options:
+                problems.append(f"{target} is not a read-only proc")
+        elif target in _WRITABLE_TMPFS:
+            expected = _WRITABLE_TMPFS[target]
+            if fstype != "tmpfs" or not writable or f"size={expected}" not in options:
+                problems.append(f"{target} is {fstype} {option_text}")
+        elif target in _DEVICE_MOUNTS:
+            continue
+        else:
+            problems.append(f"unexpected mount {target} {fstype}")
+    for required in ("/", "/usr", "/proc", "/work", "/tmp", "/dev"):
+        if required not in seen:
+            problems.append(f"missing mount {required}")
+    if problems:
+        _fail("isolation_unavailable", "mount check failed: " + "; ".join(problems[:6]), 96)
+
+
 def _assert_sandbox() -> None:
     try:
         entries = set(os.listdir("/"))
     except OSError as exc:
         _fail("isolation_unavailable", f"cannot list sandbox root: {exc}", 96)
     extra = entries - ALLOWED_ROOT
-    if extra or not {"usr", "work", "proc"} <= entries:
+    if extra or not {"usr", "work", "proc", "payload"} <= entries:
         _fail("isolation_unavailable", f"unexpected root entries: {sorted(entries)}", 96)
     for path in ("/workspace", "/oldroot", "/home", "/etc"):
         if os.path.exists(path):
             _fail("isolation_unavailable", f"host path is visible: {path}", 96)
-    usr_readonly = False
     try:
         mounts = open("/proc/mounts", encoding="utf-8", errors="replace").read().splitlines()
     except OSError as exc:
         _fail("isolation_unavailable", f"cannot read mounts: {exc}", 96)
-    for line in mounts:
-        parts = line.split()
-        if len(parts) >= 4 and parts[1] == "/usr":
-            options = set(parts[3].split(","))
-            if "rw" in options:
-                _fail("isolation_unavailable", "usr is mounted read-write", 96)
-            if "ro" in options:
-                usr_readonly = True
-    if not usr_readonly:
-        _fail("isolation_unavailable", "usr is not a read-only mount", 96)
+    _assert_mounts(mounts)
     if _status_value("Seccomp") != "2":
         _fail("isolation_unavailable", "seccomp filter is not active", 96)
     try:
@@ -78,12 +115,42 @@ def _nondumpable() -> None:
         _fail("isolation_unavailable", "PR_SET_DUMPABLE failed", 96)
 
 
+def _sanitize_exception_text(text: str) -> str:
+    cleaned = " ".join(str(text).split())
+    cleaned = _SECRET_BEARER.sub("bearer [redacted]", cleaned)
+    cleaned = _SECRET_KEY.sub(lambda match: match.group(1) + " [redacted]", cleaned)
+    cleaned = _SECRET_TOKEN.sub("[redacted]", cleaned)
+    return cleaned[:180]
+
+
+def _exception_chain(exc: BaseException, limit: int = 4) -> list[BaseException]:
+    chain: list[BaseException] = []
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and len(chain) < limit and id(current) not in seen:
+        seen.add(id(current))
+        chain.append(current)
+        if current.__cause__ is not None:
+            current = current.__cause__
+            continue
+        if current.__context__ is not None and not current.__suppress_context__:
+            current = current.__context__
+            continue
+        current = None
+    return chain
+
+
 def _runtime_detail(exc: BaseException) -> str:
-    text = _short(exc)
+    """Include a short cause chain. Messages only; no traceback locals or headers."""
+    parts = [
+        f"{type(item).__name__}: {_sanitize_exception_text(item)}"
+        for item in _exception_chain(exc)
+    ]
+    text = " | ".join(parts)
     lowered = text.lower()
     if any(marker in lowered for marker in ("libblas", "liblapack", "libgfortran", "shared object", ".so")):
-        return ("missing runtime library: " + text)[:400]
-    return text
+        text = "missing runtime library: " + text
+    return text[:400]
 
 
 def _block_new_processes() -> None:
@@ -157,7 +224,7 @@ def _decision(fn, frame) -> dict:
     try:
         raw = fn(frame)
     except Exception as exc:
-        return {"ok": False, "status": "runtime_error", "detail": _short(exc)}
+        return {"ok": False, "status": "runtime_error", "detail": _runtime_detail(exc)}
     if not isinstance(raw, dict):
         return {"ok": False, "status": "malformed_output", "detail": "generate() must return an object"}
     try:
@@ -196,7 +263,9 @@ class _Lines:
 def worker() -> None:
     _assert_sandbox()
     _nondumpable()
-    failure_path = "/work/runtime_failure.txt"
+    # Simulated host injection for the exit-96 reporting path. It is not evidence
+    # of a real missing library; that comes from the exception cause chain.
+    failure_path = "/payload/runtime_failure.txt"
     if os.path.exists(failure_path):
         detail = open(failure_path, encoding="utf-8").read().strip()[:200]
         _emit(
@@ -215,7 +284,7 @@ def worker() -> None:
     import importlib.util
 
     try:
-        spec = importlib.util.spec_from_file_location("candidate", "/work/candidate.py")
+        spec = importlib.util.spec_from_file_location("candidate", "/payload/candidate.py")
         if spec is None or spec.loader is None:
             _fail("runtime_error", "candidate could not be loaded", 0)
         module = importlib.util.module_from_spec(spec)
@@ -275,7 +344,7 @@ def supervisor() -> None:
         env = dict(os.environ)
         os.execve(
             "/usr/bin/python3",
-            ["/usr/bin/python3", "-I", "-B", "/work/inner.py", "worker"],
+            ["/usr/bin/python3", "-I", "-B", "/payload/inner.py", "worker"],
             env,
         )
         os._exit(127)

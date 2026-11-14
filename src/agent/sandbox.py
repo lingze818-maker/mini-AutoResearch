@@ -5,21 +5,23 @@ private work directory, starts ``isolate.py``, and reads back a JSON signal
 list. Those booleans are later replayed by the existing vectorbt runner.
 
 Isolation is a new user, mount, pid, network, ipc, and uts namespace. The
-sandboxed root is a fresh tree: read-only ``/usr``, a fresh procfs, and three
-tmpfs mounts (``/work``, ``/tmp``, ``/dev``). ``/work`` is not a bind of the
-host directory. The repository, data directory, config, judge, credentials,
-``/etc``, and host sockets are not mounted. Capabilities are dropped,
-``no_new_privs`` is set, and a seccomp denylist blocks network, mount,
-namespace, ptrace, and related calls. After pandas is imported, the worker
-also denies ``execve`` and every ``clone``/``fork``/``clone3``, so the
-candidate cannot start a process or thread.
+sandbox root is a 1 MiB tmpfs remounted read-only after pivot; it is not a
+bind of the host temp directory. ``/usr`` is a read-only bind of the
+interpreter tree, ``/proc`` is a read-only procfs, and ``/work``, ``/tmp``,
+and ``/dev`` are the only writable mounts, each a size-capped tmpfs. The
+helper checks every mount in ``/proc/mounts`` before loading a candidate and
+fails closed on a mismatch. The repository, data directory, config, judge,
+credentials, ``/etc``, and host sockets are not mounted. Capabilities are
+dropped, ``no_new_privs`` is set, and a seccomp denylist blocks network,
+mount, namespace, ptrace, and related calls. After pandas is imported, the
+worker also denies ``execve`` and every ``clone``/``fork``/``clone3``.
 
 This is not a full syscall allowlist. ``/usr`` remains readable. ``RLIMIT_NPROC``
 is not used, and a cgroup pids limit is not available here. Writable bytes are
-the sum of the tmpfs sizes. A wall-clock kill covers the process group. If
+only the three tmpfs sizes. A wall-clock kill covers the process group. If
 isolation or the runtime libraries are unavailable, the result is
-``isolation_unavailable`` with the helper's detail, and the candidate is not
-run on the host.
+``isolation_unavailable`` with the helper's detail, including a short
+exception cause chain, and the candidate is not run on the host.
 """
 
 from __future__ import annotations

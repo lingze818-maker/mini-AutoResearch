@@ -44,9 +44,12 @@ EPERM = 1
 # initialize. The worker then denies every clone/fork. These byte sizes must
 # stay equal to agent.limits; tests compare them.
 _NS_MASK = 0x7E020080
+_ROOT_BYTES = 1 * 1024 * 1024
 _WORK_BYTES = 2 * 1024 * 1024
 _TMP_BYTES = 4 * 1024 * 1024
 _DEV_BYTES = 1 * 1024 * 1024
+_WRITABLE_MOUNTS = {"/work", "/tmp", "/dev"}
+_DEVICE_MOUNTS = {"/dev/null", "/dev/zero", "/dev/full", "/dev/urandom"}
 # mount, umount2, pivot_root, the new mount API, unshare, setns, ptrace,
 # process_vm_readv/writev, socket family, io_uring, module loading, bpf, perf,
 # userfaultfd, clone3, open_by_handle_at, pidfd_getfd, keyring, memfd, landlock,
@@ -151,11 +154,72 @@ def _write_id_maps(uid: int, gid: int) -> None:
         handle.write(f"0 {gid} 1\n")
 
 
+def _remount_readonly(target: str) -> None:
+    if libc.mount(None, target.encode(), None, MS_REMOUNT | MS_RDONLY, None) != 0:
+        raise _os_error(f"remount read-only {target}")
+
+
+def _mount_table() -> list[list[str]]:
+    rows = []
+    with open("/proc/mounts", encoding="utf-8", errors="replace") as handle:
+        for line in handle:
+            parts = line.split()
+            if len(parts) >= 4:
+                rows.append(parts)
+    return rows
+
+
+def _seal_and_check_mounts() -> None:
+    """Remount every non-allowlisted writable mount read-only, then refuse a bad table.
+
+    `/` must be the tmpfs created above, not the host ext4 directory that
+    pivot_root used to keep. A failed seal does not continue into the helper.
+    """
+    for parts in _mount_table():
+        target, options = parts[1], set(parts[3].split(","))
+        if "rw" in options and target not in _WRITABLE_MOUNTS and target not in _DEVICE_MOUNTS:
+            _remount_readonly(target)
+    problems: list[str] = []
+    seen: set[str] = set()
+    for parts in _mount_table():
+        source, target, fstype, option_text = parts[0], parts[1], parts[2], parts[3]
+        options = set(option_text.split(","))
+        seen.add(target)
+        writable = "rw" in options
+        if target == "/":
+            # The root must be the private tmpfs. A read-only ext4 bind of the
+            # host temp directory is not accepted.
+            if fstype != "tmpfs" or writable or "ro" not in options:
+                problems.append(f"root is {source} {fstype} {option_text}")
+        elif target == "/usr" or target.startswith("/usr/"):
+            # /usr is the read-only interpreter tree. Its backing device may be
+            # the host filesystem; it is still rejected unless the mount is ro.
+            if writable or "ro" not in options:
+                problems.append(f"usr mount {target} is writable")
+        elif target == "/proc" or target.startswith("/proc/"):
+            if fstype != "proc" or writable or "ro" not in options:
+                problems.append(f"proc mount {target} is {fstype} {option_text}")
+        elif target in _WRITABLE_MOUNTS:
+            if fstype != "tmpfs" or not writable:
+                problems.append(f"{target} is {fstype} {option_text}")
+        elif target in _DEVICE_MOUNTS:
+            continue
+        else:
+            problems.append(f"unexpected mount {target} {source} {fstype} {option_text}")
+    for required in ("/", "/usr", "/proc", "/work", "/tmp", "/dev"):
+        if required not in seen:
+            problems.append(f"missing mount {required}")
+    if problems:
+        raise OSError(1, "mount seal failed: " + "; ".join(problems[:8]))
+
+
 def _setup_root(work: str, newroot: str) -> None:
     _mount(None, "/", None, MS_REC | MS_PRIVATE)
     os.makedirs(newroot, exist_ok=True)
-    _mount(newroot, newroot, None, MS_BIND)
-    for name in ("usr", "proc", "tmp", "dev", "work", "oldroot"):
+    # Cover the host directory before creating anything inside it. The tmpfs,
+    # not the host ext4 inode, becomes the sandbox root.
+    _mount("tmpfs", newroot, "tmpfs", MS_NOSUID | MS_NODEV, f"size={_ROOT_BYTES},mode=755")
+    for name in ("usr", "proc", "tmp", "dev", "work", "payload", "oldroot"):
         os.makedirs(f"{newroot}/{name}", exist_ok=True)
     _mount("/usr", f"{newroot}/usr", None, MS_BIND | MS_REC)
     _mount(None, f"{newroot}/usr", None, MS_BIND | MS_REMOUNT | MS_RDONLY)
@@ -163,7 +227,7 @@ def _setup_root(work: str, newroot: str) -> None:
         path = f"{newroot}/{link}"
         if not os.path.lexists(path):
             os.symlink(target, path)
-    _mount("proc", f"{newroot}/proc", "proc", MS_NOSUID | MS_NODEV | MS_NOEXEC)
+    _mount("proc", f"{newroot}/proc", "proc", MS_RDONLY | MS_NOSUID | MS_NODEV | MS_NOEXEC)
     _mount("tmpfs", f"{newroot}/tmp", "tmpfs", MS_NOSUID | MS_NODEV, f"size={_TMP_BYTES},mode=700")
     _mount("tmpfs", f"{newroot}/dev", "tmpfs", MS_NOSUID | MS_NOEXEC, f"size={_DEV_BYTES},mode=755")
     for node in ("null", "zero", "full", "urandom"):
@@ -176,7 +240,7 @@ def _setup_root(work: str, newroot: str) -> None:
         source = os.path.join(work, name)
         if name == "runtime_failure.txt" and not os.path.exists(source):
             continue
-        target = f"{newroot}/work/{name}"
+        target = f"{newroot}/payload/{name}"
         with open(source, "rb") as incoming, open(target, "wb") as outgoing:
             outgoing.write(incoming.read())
         os.chmod(target, 0o644)
@@ -190,6 +254,7 @@ def _setup_root(work: str, newroot: str) -> None:
         os.rmdir("/oldroot")
     except OSError as exc:
         raise OSError(exc.errno, "old root is still present after umount") from exc
+    _seal_and_check_mounts()
 
 
 def _set_limits(cpu_seconds: int) -> None:
@@ -337,7 +402,7 @@ def _become(work: str, newroot: str, cpu_seconds: int, uid: int, gid: int) -> No
         "NUMEXPR_NUM_THREADS": "1",
         "NUMBA_NUM_THREADS": "1",
     }
-    os.execve("/usr/bin/python3", ["/usr/bin/python3", "-I", "-B", "/work/inner.py"], env)
+    os.execve("/usr/bin/python3", ["/usr/bin/python3", "-I", "-B", "/payload/inner.py"], env)
     os._exit(127)
 
 

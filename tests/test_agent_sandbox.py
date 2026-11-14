@@ -12,11 +12,14 @@ from agent.limits import (
     AGGREGATE_WRITABLE_BYTES,
     DEV_TMPFS_BYTES,
     FILE_BYTES,
+    ROOT_TMPFS_BYTES,
     TMP_TMPFS_BYTES,
     WORK_TMPFS_BYTES,
 )
-from agent.sandbox import _interpret, replay_strategy, run_candidate
 import agent.isolate as isolate_module
+import agent.sandbox as sandbox_module
+from agent.inner import _runtime_detail
+from agent.sandbox import _interpret, replay_strategy, run_candidate
 from backtest.runner import run_backtest
 from tests.conftest import ROOT, bars_from_closes
 
@@ -291,6 +294,7 @@ def test_replay_uses_the_existing_runner_and_next_bar_fill(monkeypatch):
 
 
 def test_tmpfs_ceilings_match_and_cover_the_per_file_rlimit():
+    assert isolate_module._ROOT_BYTES == ROOT_TMPFS_BYTES
     assert isolate_module._WORK_BYTES == WORK_TMPFS_BYTES == FILE_BYTES
     assert isolate_module._TMP_BYTES == TMP_TMPFS_BYTES
     assert isolate_module._DEV_BYTES == DEV_TMPFS_BYTES
@@ -371,6 +375,113 @@ def test_exit_96_keeps_the_missing_library_detail():
     assert "libblas.so.3" in outcome.detail
     assert "sandbox setup failed" not in outcome.detail
     assert "ignored" not in outcome.detail
+
+
+def _host_root_mount() -> str:
+    for line in Path("/proc/mounts").read_text(encoding="utf-8").splitlines():
+        parts = line.split()
+        if len(parts) > 1 and parts[1] == "/":
+            return line
+    raise AssertionError("host root mount is missing")
+
+
+def test_root_and_uncovered_dirs_cannot_mutate_host_disk(tmp_path, monkeypatch):
+    """Small sentinels only. Host temp bytes must stay free of spill files.
+
+    Helper and candidate source live on the read-only root (/payload), not on
+    writable /work. importlib loads that file once before generate() runs, so
+    a later write to /work cannot replace the running helper.
+    """
+    host_root_before = _host_root_mount()
+    host_keep = tmp_path / "host-keep.txt"
+    host_keep.write_text("keep", encoding="utf-8")
+    captured: dict[str, object] = {}
+    real_rmtree = sandbox_module._safe_rmtree
+
+    def snapshot(path: str) -> None:
+        base = Path(path)
+        files = [item for item in base.rglob("*") if item.is_file()]
+        captured["names"] = [item.name for item in files]
+        captured["big"] = [item.name for item in files if item.stat().st_size > 100_000]
+        newroot = base / "newroot"
+        captured["newroot"] = [item.name for item in newroot.rglob("*")] if newroot.exists() else []
+        real_rmtree(path)
+
+    monkeypatch.setattr(sandbox_module, "_safe_rmtree", snapshot)
+    source = (
+        "def generate(bars):\n"
+        "    import os\n"
+        "    failures = []\n"
+        "    def expect_ro(label, action):\n"
+        "        try:\n"
+        "            action()\n"
+        "        except OSError as exc:\n"
+        "            if exc.errno != 30:\n"
+        "                failures.append(label + ':' + str(exc.errno))\n"
+        "        else:\n"
+        "            failures.append(label + ':ok')\n"
+        "    expect_ro('spill_a', lambda: open('/spill_A', 'wb').write(b'sentinel-a'))\n"
+        "    expect_ro('spill_b', lambda: open('/spill_B', 'wb').write(b'sentinel-b'))\n"
+        "    expect_ro('bin_file', lambda: open('/bin/spill_C', 'wb').write(b'sentinel-c'))\n"
+        "    expect_ro('usr_file', lambda: open('/usr/spill_D', 'wb').write(b'sentinel-d'))\n"
+        "    expect_ro('rename_bin', lambda: os.rename('/bin', '/bin_moved'))\n"
+        "    expect_ro('unlink_bin', lambda: os.unlink('/bin'))\n"
+        "    expect_ro('symlink', lambda: os.symlink('/tmp/x', '/spill_link'))\n"
+        "    expect_ro('mkdir', lambda: os.mkdir('/newdir'))\n"
+        "    expect_ro('helper', lambda: open('/payload/inner.py', 'a', encoding='utf-8').write('\\n'))\n"
+        "    expect_ro('source', lambda: open('/payload/candidate.py', 'w', encoding='utf-8').write('x'))\n"
+        "    if failures:\n"
+        "        raise RuntimeError(' '.join(failures))\n"
+        "    return {'entry': False, 'exit': False}\n"
+    )
+    outcome = run_candidate(source, bars_from_closes([100, 101, 102, 103]), timeout_s=20)
+    assert outcome.ok, outcome.detail
+    assert captured["big"] == []
+    assert captured["newroot"] == []
+    assert not any(name.lower().startswith("spill") for name in captured["names"])
+    assert host_keep.read_text(encoding="utf-8") == "keep"
+    assert _host_root_mount() == host_root_before
+    assert "ext4" in host_root_before and "rw" in host_root_before.split()[3]
+
+
+def test_runtime_detail_formatter_keeps_a_nested_library_cause():
+    """Formatter unit test only. This does not execute inside the sandbox."""
+    try:
+        try:
+            raise OSError("libblas.so.3: cannot open shared object file: No such file or directory")
+        except OSError as cause:
+            raise ImportError("you should not try to import numpy from its source directory") from cause
+    except ImportError as exc:
+        detail = _runtime_detail(exc)
+    assert "source directory" in detail
+    assert "libblas.so.3" in detail
+    assert "missing runtime library" in detail
+    try:
+        raise OSError("libblas.so.3 Authorization: Bearer sk-test-secret-value")
+    except OSError as exc:
+        redacted = _runtime_detail(exc)
+    assert "sk-test-secret-value" not in redacted
+    assert "Bearer" not in redacted
+    assert "libblas.so.3" in redacted
+
+
+def test_real_libblas_cause_survives_the_sandbox_exception_chain():
+    """Actual dlopen of the distro symlink. /etc is not mounted. Not the runtime_failure.txt injection."""
+    source = (
+        "def generate(bars):\n"
+        "    import ctypes\n"
+        "    try:\n"
+        "        ctypes.CDLL('/usr/lib/x86_64-linux-gnu/libblas.so.3')\n"
+        "    except OSError as cause:\n"
+        "        raise ImportError('you should not try to import numpy from its source directory') from cause\n"
+        "    return {'entry': False, 'exit': False}\n"
+    )
+    outcome = run_candidate(source, bars_from_closes([100, 101, 102, 103]), timeout_s=20)
+    assert outcome.status == "runtime_error"
+    assert "source directory" in outcome.detail
+    assert "libblas" in outcome.detail.lower()
+    assert "missing runtime library" in outcome.detail
+    assert outcome.detail != "sandbox setup failed"
 
 
 def test_injected_runtime_failure_is_reported_from_the_real_sandbox():

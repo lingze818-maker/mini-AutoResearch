@@ -13,10 +13,12 @@ MAX_STDERR_BYTES = 64_000
 
 # Address-space rlimit for the isolated interpreter. pandas/numpy stay well under this.
 MEMORY_BYTES = 1024 * 1024 * 1024
-# Per-file rlimit only. It is not the aggregate disk cap: two files under this
-# size can still fill an unbounded host bind. Writable storage is the tmpfs
-# sizes below, and every writable mount is a tmpfs.
+# Per-file rlimit. It is not the aggregate cap by itself.
+# The sandbox root is a separate tmpfs that is remounted read-only before any
+# candidate runs. It is not a host ext4 bind and it is not part of the writable
+# budget. Only /work, /tmp, and /dev are writable, and each is its own tmpfs.
 FILE_BYTES = 2 * 1024 * 1024
+ROOT_TMPFS_BYTES = 1 * 1024 * 1024
 WORK_TMPFS_BYTES = 2 * 1024 * 1024
 TMP_TMPFS_BYTES = 4 * 1024 * 1024
 DEV_TMPFS_BYTES = 1 * 1024 * 1024

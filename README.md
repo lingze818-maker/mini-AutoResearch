@@ -141,17 +141,20 @@ PYTHONPATH=src python -m agent --demo --rerun
 
 隔离用的是 Linux 的 user、mount、pid、net、ipc、uts namespace。子进程把自己映射成该命名空间里的 root，`pivot_root` 到一个新根，再丢掉 capabilities，打开 `no_new_privs`，并装上 seccomp。新根只有只读的 `/usr`、新的 procfs、`null/zero/full/urandom`、一块 tmpfs，以及只放了 helper 和候选源码的工作目录。不挂载仓库、`data/`、配置、judge、凭证或宿主套接字。环境变量换成一份固定的小名单，不继承宿主环境。
 
-候选代码只在 worker 里由 helper 加载。宿主读回 JSON 信号；helper 以非 0 退出时，如果标准输出里有结构化原因，宿主保留这段原因，而不是改写成笼统的 `sandbox setup failed`。墙钟默认 60 秒，超时会杀掉整个进程组。CPU rlimit 比墙钟多几秒，地址空间 1 GiB，标准输出最多 1 MB。任一候选失败都记成结构化记录，下一只候选继续。
+候选代码只在 worker 里由 helper 加载。helper 和候选源码放在 `/payload`，那是只读根上的目录，不在可写的 `/work`。worker 用 importlib 从 `/payload/candidate.py` 读一次，读完才执行 `generate`；之后改 `/work` 换不掉已经装进内存的函数，源码文件本身也因根只读而不能改。宿主读回 JSON 信号。helper 以非 0 退出时，如果标准输出里有结构化原因，宿主保留这段原因，而不是改写成笼统的 `sandbox setup failed`。导入失败会沿 `__cause__` / `__context__` 收几层异常消息（有长度上限，并去掉 bearer / api key 样式的片段），所以包装用的 ImportError 不会把底层的 `libblas.so.3` 吃掉。墙钟默认 60 秒，超时会杀掉整个进程组。CPU rlimit 比墙钟多几秒，地址空间 1 GiB，标准输出最多 1 MB。任一候选失败都记成结构化记录，下一只候选继续。
 
-可写空间全部是 tmpfs，没有把宿主目录绑进沙箱：
+沙箱根是一块 1 MiB 的 tmpfs，pivot 之后重新挂成只读。它不是宿主临时目录的 ext4 绑定。在加载任何候选之前，helper 会核对 `/proc/mounts`：根必须是只读 tmpfs，`/proc` 必须是只读 proc，`/usr` 必须只读，除此之外的可写挂载只能是下面三块 tmpfs。对不上就 `isolation_unavailable`，候选不会跑。
 
-| 挂载 | 大小 | 作用 |
-| --- | --- | --- |
-| `/work` | 2 MiB | helper、候选源码，以及候选自己的写入 |
-| `/tmp` | 4 MiB | 临时文件 |
-| `/dev` | 1 MiB | `null`、`zero`、`full`、`urandom` |
+| 挂载 | 大小 | 权限 | 作用 |
+| --- | --- | --- | --- |
+| `/` | 1 MiB tmpfs | 只读 | 根、`/payload`、`bin`/`lib` 符号链接 |
+| `/usr` | 宿主文件系统的只读绑定 | 只读 | 解释器和已经装进 `/usr` 的 wheel |
+| `/proc` | 新的 procfs | 只读 | 本命名空间的进程信息 |
+| `/work` | 2 MiB tmpfs | 可写 | 候选自己的临时文件 |
+| `/tmp` | 4 MiB tmpfs | 可写 | 临时文件 |
+| `/dev` | 1 MiB tmpfs | 可写 | `null`、`zero`、`full`、`urandom` |
 
-三者合计 7 MiB。`RLIMIT_FSIZE` 也是 2 MiB，但它只限制单个文件；两个各自小于 2 MiB 的文件仍然会把 `/work` 写满并得到 `ENOSPC`。候选写不进宿主磁盘。
+可写合计仍是 7 MiB，而且都不在宿主磁盘上。`RLIMIT_FSIZE` 是 2 MiB 的单文件上限；两个各自小于 2 MiB 的文件会把 `/work` 写满并得到 `ENOSPC`。在 `/`、`/payload`、`/usr` 上创建、改名、删除或做符号链接会得到 `EROFS`，不会写进宿主的临时目录。`/usr` 仍是宿主解释器树的只读视图，这是残留限制，不是可写绑定。
 
 进程和线程：bootstrap 的 seccomp 仍允许一次普通 `clone`，这样受信任的 supervisor 能拉起唯一的 worker，pandas 也能在导入时完成初始化。worker 导入 pandas 之后再叠一层过滤器，拒绝 `clone`、`fork`、`vfork`、`clone3` 和 `execve`。候选因此不能再起进程或线程。这里没有用 `RLIMIT_NPROC`：它按宿主 uid 计数，设成 64 也不会生效（本环境的上限是 63994）。`/sys/fs/cgroup` 不可写，所以也没有 cgroup `pids.max`。墙钟杀死的是整个进程组，包括已经存在的子进程。
 
