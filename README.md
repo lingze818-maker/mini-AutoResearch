@@ -1,8 +1,8 @@
 # mini-AutoResearch
 
-回测和评估骨架。用合成日线把「策略 → vectorbt 回测 → 指标 → 写死判定」跑通。价格按前复权（qfq）理解，和以后的数据层同一口径。仓库里没有密钥；API Key 只放环境变量。
+回测和评估骨架，加上一轮有边界的研究循环。用合成日线把「策略 → vectorbt 回测 → 指标 → 写死判定」跑通。价格按前复权（qfq）理解。仓库里没有密钥；API Key 只放环境变量。
 
-回测读取已经清洗好的日线。取数在 `src/data`：用 akshare 的 `fund_etf_hist_em` 拉 510300、510500、518880 的前复权日线，区间是 2019-01-01 到 2026-10-31。缺日和停牌不补。Agent 循环、工具和沙箱不在这里。判定仍是原来的 `src/eval`。
+回测读取已经清洗好的日线。取数在 `src/data`：用 akshare 的 `fund_etf_hist_em` 拉 510300、510500、518880 的前复权日线，区间是 2019-01-01 到 2026-10-31。缺日和停牌不补。判定仍是原来的 `src/eval`，阈值和规则没有改。研究循环在 `src/agent`：默认是离线夹具，生成的策略代码只在沙箱里跑，宿主再用原来的 vectorbt runner 回放信号。
 
 ## 安装
 
@@ -102,3 +102,78 @@ PYTHONPATH=src python -m pytest
 7. 其余方向不一致，淘汰。
 
 「通过」只说明样本内外方向一致，而且回撤和换手还在阈值里。它不表示这条规则能赚钱。
+
+## 研究循环
+
+默认是离线夹具，不是模型研究。终端和 `reports/agent_demo/summary.json` 的第一句都是：
+
+`offline simulated proposal, not a real model research run`
+
+在仓库根目录：
+
+```bash
+PYTHONPATH=src python -m agent --demo --rerun
+```
+
+`--rerun` 只删除并重写 `reports/agent_demo/`。不带 `--rerun` 时，目录已经存在就退出，原来的文件不动。两条路都不会写 `reports/baseline/`。输出里有锁定的候选定义、失败探针、每只标的的指标和判定、净值曲线，以及停止原因。
+
+这一轮只做一次：用样本内摘要提出 3 个预设候选，先把定义写进 `candidates_locked.json`（`oos_evaluated` 为 false），再跑沙箱和回测。样本外判定一旦写出来就停止，`stop.reason` 是 `oos_verdict_disclosed`，provider 只调用一次。判定来自 `judge`，模型不能改。没有用样本外结果做第二轮提案或搜参数。
+
+候选是因果的 `generate(bars)`。沙箱里的 worker 每次只收到当前 bar 和更早的 bar，再要下一根之前必须先交回这一根的布尔信号。`shift(-1)` 在当前前缀的最后一行上拿不到未来价格。宿主不 import、不 exec 生成代码，只检查信号长度、对齐和布尔类型，然后交给原来的 `run_backtest`。成交仍然是信号用当日收盘、下一根 bar 的收盘成交，手续费仍是 0。
+
+样本外从 2024-01-01 起。这段区间已经被冻结的 20/60 双均线基线看过，是已经检查过的历史持有段，不是一份没被动过的验证集。这里的 pass 或 reject 都不是无偏发现，pass 也不表示能赚钱或可以实盘。
+
+### 这次离线记录
+
+预设是 20 日动量、20 日波动率上限 0.02、60 日动量。窗口和 0.02 是写死的例子，不是对着样本外搜出来的。判定如下，完整数字在 `reports/agent_demo/summary.json`。
+
+| 候选 | 510300 | 510500 | 518880 |
+| --- | --- | --- | --- |
+| momentum_20 | pass（aligned_pass） | pass（aligned_pass） | pass（aligned_pass） |
+| volatility_20 | pass（aligned_pass） | reject（not_aligned） | reject（oos_drawdown） |
+| momentum_60 | reject（not_aligned） | reject（not_aligned） | reject（oos_drawdown） |
+
+波动率候选在 510300 上样本内最大回撤约 0.44。判定只看样本外回撤，所以它仍是 pass。这只说明没有触发淘汰线。judge 对 pass 的原文允许再做一轮小改；这一轮实验不采纳，判定写出来就停。
+
+失败探针也记在 `reports/agent_demo/failures.json`：语法错误、超时、读哨兵、写哨兵、联网、子进程、畸形输出、读父进程内存、读仓库 `config.yaml`。九个都是 `pipeline_failure`，后面的候选仍然跑完。哨兵 `reports/agent_demo/sentinel_host_only.txt` 的内容在探针前后都是 `HOST-SENTINEL-UNCHANGED`，sha256 都是 `d8d338329495c982dfaeb8d0c040076aaf48d7438ab1d33ae0ef7d4080ba35d3`。
+
+### 沙箱
+
+隔离用的是 Linux 的 user、mount、pid、net、ipc、uts namespace。子进程把自己映射成该命名空间里的 root，`pivot_root` 到一个新根，再丢掉 capabilities，打开 `no_new_privs`，并装上 seccomp。新根只有只读的 `/usr`、新的 procfs、`null/zero/full/urandom`、一块 tmpfs，以及只放了 helper 和候选源码的工作目录。不挂载仓库、`data/`、配置、judge、凭证或宿主套接字。环境变量换成一份固定的小名单，不继承宿主环境。
+
+候选代码只在这个进程里由 helper 加载。宿主读回 JSON 信号。墙钟默认 60 秒，CPU rlimit 比墙钟多几秒，地址空间 1 GiB，单文件写入 2 MiB，标准输出最多 1 MB。任一候选失败都记成结构化记录，下一只候选继续。
+
+下面任一条件不满足时，结果是 `isolation_unavailable`，候选不会在宿主上补跑：
+
+- 不是 Linux x86_64
+- `unshare` 建不起 user/mount/pid/net namespace
+- `/usr` 不能重新挂成只读
+- 沙箱根目录上能看见宿主路径
+- seccomp 没有挡住 `socket()`
+
+依赖要能被沙箱里的 `/usr/bin/python3` import。pandas 需要装在这棵只读的 `/usr` 下面，例如 `/usr/local`。仓库里的 virtualenv 不会被挂进去。沙箱里 import 失败同样是 `isolation_unavailable`，不会改到宿主进程里执行。
+
+这次环境里上述检查是实际跑过的，不是跳过的。`PYTHONPATH=src python -m pytest` 里的 `tests/test_agent_sandbox.py` 覆盖了正常策略、未来价格扰动、语法错误、超时、哨兵读写、本机监听端口收不到连接、子进程、畸形输出、环境变量不继承，以及隔离启动失败时不在宿主执行。没有 skip。`failures.json` 是同一次演示命令里再次执行这些探针的记录。
+
+实际边界比「不能访问宿主」更窄，限制也要写清楚：
+
+- `/usr` 对候选是只读可见的，这样才能跑解释器和 pandas。候选读得到 `/usr` 里宿主用户本来就能读的文件，写会被只读挂载拒绝。
+- seccomp 是拒绝名单（网络、mount、namespace、ptrace、io_uring、模块加载；worker 里再拒绝 execve），不是完整的 syscall 白名单。没点名的 syscall 仍然允许。
+- 命名空间里仍可以 `fork`。子进程继承同一套 namespace 和 seccomp，`execve` 在 worker 里会被拒绝，所以 `subprocess` 起不来新程序。
+- 资源限制是 rlimit 加墙钟杀掉进程，不是 cgroup。没有把 `RLIMIT_NPROC` 设得很小，因为它按宿主 uid 计数，会把无关进程算进去。
+- 沙箱里的 root 映射回宿主上的当前用户，再丢掉 capabilities。这不是宿主上的另一个 uid。
+- 新的 procfs 看不到其他宿主进程，但 `/proc` 里的内核接口还在。
+
+### 模型
+
+计划中的在线接口是 DeepSeek 的 tool calling，请求形状按常见的 chat-completions 来写，**没有对真实账号验证过**。模型名只从环境变量 `DEEPSEEK_MODEL` 读，程序不内置一个当前模型 id。默认基址是 `https://api.deepseek.com`，可用 `DEEPSEEK_BASE_URL` 改。路径 `/chat/completions` 是未验证的假设。
+
+在线模式必须显式加上 `--live`。密钥只读 `DEEPSEEK_API_KEY`。缺密钥或缺模型名时直接失败，**不会退回离线夹具**。调用次数最多 2 轮，每轮最多再重试 1 次，`max_tokens` 2048，单次超时 30 秒。工具只有样本内摘要、提交候选，以及两个宿主专用占位：回测和写报告。后两个对模型只返回拒绝，不给路径、不给样本外结果、不让模型写判定。回复和参数都会做校验。异常文本里不放 Authorization 头。
+
+本里程碑没有提供密钥，也没有发任何在线请求。提交里的 `reports/agent_demo/` 全部来自离线夹具。
+
+```bash
+DEEPSEEK_API_KEY=... DEEPSEEK_MODEL=... PYTHONPATH=src python -m agent --demo --live --rerun
+```
+
+不设密钥时这条命令退出码是 2。
