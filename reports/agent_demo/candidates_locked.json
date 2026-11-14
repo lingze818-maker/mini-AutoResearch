@@ -1,0 +1,32 @@
+{
+  "locked": true,
+  "phase": "locked_before_oos",
+  "oos_evaluated_at_lock": false,
+  "banner": "offline simulated proposal, not a real model research run",
+  "candidates": [
+    {
+      "id": "momentum_20",
+      "name": "20-day momentum",
+      "rationale": "offline simulated proposal, not a real model research run In-sample summary used for context only: 510300 in-sample return 0.338462, 510500 in-sample return 0.482659, 518880 in-sample return 0.63835. Lookbacks 20 and 60 and the 0.02 volatility ceiling are presets, not a search.",
+      "source": "def generate(bars):\n    \"\"\"20-bar momentum. `bars` is only the current prefix.\"\"\"\n    close = bars[\"close\"].astype(float)\n    if len(close) <= 20:\n        return {\"entry\": False, \"exit\": False}\n    ratio = float(close.iloc[-1] / close.iloc[-21]) - 1.0\n    if ratio > 0.0:\n        return {\"entry\": True, \"exit\": False}\n    if ratio < 0.0:\n        return {\"entry\": False, \"exit\": True}\n    return {\"entry\": False, \"exit\": False}\n",
+      "source_sha256": "866dc06d457e14fb224f3834ae658756bcfd598b7cbade63f0f133a92f5d3a53",
+      "mechanism": "prefix_only_generate"
+    },
+    {
+      "id": "volatility_20",
+      "name": "20-day volatility ceiling",
+      "rationale": "offline simulated proposal, not a real model research run In-sample summary used for context only: 510300 in-sample return 0.338462, 510500 in-sample return 0.482659, 518880 in-sample return 0.63835. Lookbacks 20 and 60 and the 0.02 volatility ceiling are presets, not a search.",
+      "source": "def generate(bars):\n    \"\"\"Exit when 20-day realized volatility is above a preset 2% daily ceiling.\"\"\"\n    close = bars[\"close\"].astype(float)\n    if len(close) < 21:\n        return {\"entry\": False, \"exit\": False}\n    returns = close.iloc[-21:].pct_change().iloc[1:]\n    volatility = float(returns.std(ddof=0))\n    last = float(close.iloc[-1] / close.iloc[-2] - 1.0)\n    if volatility > 0.02:\n        return {\"entry\": False, \"exit\": True}\n    if last > 0.0:\n        return {\"entry\": True, \"exit\": False}\n    return {\"entry\": False, \"exit\": False}\n",
+      "source_sha256": "4bd3c1a6c57cb46228665cba9b839623a6251cdadc137cdd537aeff4fcfa8ecb",
+      "mechanism": "prefix_only_generate"
+    },
+    {
+      "id": "momentum_60",
+      "name": "60-day momentum",
+      "rationale": "offline simulated proposal, not a real model research run In-sample summary used for context only: 510300 in-sample return 0.338462, 510500 in-sample return 0.482659, 518880 in-sample return 0.63835. Lookbacks 20 and 60 and the 0.02 volatility ceiling are presets, not a search.",
+      "source": "def generate(bars):\n    \"\"\"60-bar momentum. The window is a preset, not a searched parameter.\"\"\"\n    close = bars[\"close\"].astype(float)\n    if len(close) <= 60:\n        return {\"entry\": False, \"exit\": False}\n    ratio = float(close.iloc[-1] / close.iloc[-61]) - 1.0\n    if ratio > 0.0:\n        return {\"entry\": True, \"exit\": False}\n    if ratio < 0.0:\n        return {\"entry\": False, \"exit\": True}\n    return {\"entry\": False, \"exit\": False}\n",
+      "source_sha256": "baa24ff5b9443616c2d4762d19f57b8a9947e08aad835099c0e8de4c67d71c61",
+      "mechanism": "prefix_only_generate"
+    }
+  ]
+}

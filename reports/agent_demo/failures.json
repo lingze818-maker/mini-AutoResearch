@@ -1,0 +1,83 @@
+[
+  {
+    "probe": "syntax_error",
+    "status": "syntax_error",
+    "detail": "SyntaxError: expected ':' (candidate.py, line 1)",
+    "decision": "failure",
+    "rule_id": "pipeline_failure",
+    "reason": "管道失败（syntax_error: SyntaxError: expected ':' (candidate.py, line 1)），本轮记录为失败。",
+    "elapsed_ms": 246
+  },
+  {
+    "probe": "timeout",
+    "status": "timeout",
+    "detail": "wall clock limit exceeded",
+    "decision": "failure",
+    "rule_id": "pipeline_failure",
+    "reason": "管道失败（timeout: wall clock limit exceeded），本轮记录为失败。",
+    "elapsed_ms": 2026
+  },
+  {
+    "probe": "unauthorized_read",
+    "status": "runtime_error",
+    "detail": "FileNotFoundError: [Errno 2] No such file or directory: '/workspace/reports/agent_demo/sentinel_host_only.txt'",
+    "decision": "failure",
+    "rule_id": "pipeline_failure",
+    "reason": "管道失败（runtime_error: FileNotFoundError: [Errno 2] No such file or directory: '/workspace/reports/agent_demo/sentinel_host_only.txt'），本轮记录为失败。",
+    "elapsed_ms": 246
+  },
+  {
+    "probe": "unauthorized_write",
+    "status": "runtime_error",
+    "detail": "FileNotFoundError: [Errno 2] No such file or directory: '/workspace/reports/agent_demo/sentinel_host_only.txt'",
+    "decision": "failure",
+    "rule_id": "pipeline_failure",
+    "reason": "管道失败（runtime_error: FileNotFoundError: [Errno 2] No such file or directory: '/workspace/reports/agent_demo/sentinel_host_only.txt'），本轮记录为失败。",
+    "elapsed_ms": 246
+  },
+  {
+    "probe": "network",
+    "status": "runtime_error",
+    "detail": "PermissionError: [Errno 1] Operation not permitted",
+    "decision": "failure",
+    "rule_id": "pipeline_failure",
+    "reason": "管道失败（runtime_error: PermissionError: [Errno 1] Operation not permitted），本轮记录为失败。",
+    "elapsed_ms": 367
+  },
+  {
+    "probe": "subprocess",
+    "status": "runtime_error",
+    "detail": "PermissionError: [Errno 1] Operation not permitted",
+    "decision": "failure",
+    "rule_id": "pipeline_failure",
+    "reason": "管道失败（runtime_error: PermissionError: [Errno 1] Operation not permitted），本轮记录为失败。",
+    "elapsed_ms": 245
+  },
+  {
+    "probe": "malformed_output",
+    "status": "malformed_output",
+    "detail": "entry must be a boolean",
+    "decision": "failure",
+    "rule_id": "pipeline_failure",
+    "reason": "管道失败（malformed_output: entry must be a boolean），本轮记录为失败。",
+    "elapsed_ms": 246
+  },
+  {
+    "probe": "parent_memory",
+    "status": "runtime_error",
+    "detail": "PermissionError: [Errno 13] Permission denied: '/proc/1/mem'",
+    "decision": "failure",
+    "rule_id": "pipeline_failure",
+    "reason": "管道失败（runtime_error: PermissionError: [Errno 13] Permission denied: '/proc/1/mem'），本轮记录为失败。",
+    "elapsed_ms": 247
+  },
+  {
+    "probe": "repository_config",
+    "status": "runtime_error",
+    "detail": "FileNotFoundError: [Errno 2] No such file or directory: '/workspace/config.yaml'",
+    "decision": "failure",
+    "rule_id": "pipeline_failure",
+    "reason": "管道失败（runtime_error: FileNotFoundError: [Errno 2] No such file or directory: '/workspace/config.yaml'），本轮记录为失败。",
+    "elapsed_ms": 245
+  }
+]

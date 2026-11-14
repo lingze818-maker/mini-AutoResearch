@@ -1,0 +1,10 @@
+{
+  "phase": "oos_disclosed",
+  "oos_evaluated": true,
+  "oos_disclosed": true,
+  "stop_reason": "oos_verdict_disclosed",
+  "provider_calls": 1,
+  "model_calls_after_oos": 0,
+  "lock_file": "candidates_locked.json",
+  "lock_note": "candidates_locked.json is the immutable pre-evaluation snapshot. oos_evaluated_at_lock false means that snapshot was sealed before any out-of-sample result. It is not the final status."
+}

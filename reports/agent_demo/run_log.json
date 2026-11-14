@@ -1,0 +1,146 @@
+[
+  {
+    "step": "summarize_in_sample",
+    "symbols": [
+      "510300",
+      "510500",
+      "518880"
+    ]
+  },
+  {
+    "step": "propose",
+    "provider": "offline-fixture",
+    "count": 3,
+    "banner": "offline simulated proposal, not a real model research run"
+  },
+  {
+    "step": "lock_candidates",
+    "ids": [
+      "momentum_20",
+      "volatility_20",
+      "momentum_60"
+    ]
+  },
+  {
+    "step": "sandbox_failure_probe",
+    "probe": "syntax_error",
+    "status": "syntax_error"
+  },
+  {
+    "step": "sandbox_failure_probe",
+    "probe": "timeout",
+    "status": "timeout"
+  },
+  {
+    "step": "sandbox_failure_probe",
+    "probe": "unauthorized_read",
+    "status": "runtime_error"
+  },
+  {
+    "step": "sandbox_failure_probe",
+    "probe": "unauthorized_write",
+    "status": "runtime_error"
+  },
+  {
+    "step": "sandbox_failure_probe",
+    "probe": "network",
+    "status": "runtime_error"
+  },
+  {
+    "step": "sandbox_failure_probe",
+    "probe": "subprocess",
+    "status": "runtime_error"
+  },
+  {
+    "step": "sandbox_failure_probe",
+    "probe": "malformed_output",
+    "status": "malformed_output"
+  },
+  {
+    "step": "sandbox_failure_probe",
+    "probe": "parent_memory",
+    "status": "runtime_error"
+  },
+  {
+    "step": "sandbox_failure_probe",
+    "probe": "repository_config",
+    "status": "runtime_error"
+  },
+  {
+    "step": "backtest",
+    "candidate": "momentum_20",
+    "symbol": "510300",
+    "status": "ok",
+    "decision": "pass",
+    "rule_id": "aligned_pass"
+  },
+  {
+    "step": "backtest",
+    "candidate": "momentum_20",
+    "symbol": "510500",
+    "status": "ok",
+    "decision": "pass",
+    "rule_id": "aligned_pass"
+  },
+  {
+    "step": "backtest",
+    "candidate": "momentum_20",
+    "symbol": "518880",
+    "status": "ok",
+    "decision": "pass",
+    "rule_id": "aligned_pass"
+  },
+  {
+    "step": "backtest",
+    "candidate": "volatility_20",
+    "symbol": "510300",
+    "status": "ok",
+    "decision": "pass",
+    "rule_id": "aligned_pass"
+  },
+  {
+    "step": "backtest",
+    "candidate": "volatility_20",
+    "symbol": "510500",
+    "status": "ok",
+    "decision": "reject",
+    "rule_id": "not_aligned"
+  },
+  {
+    "step": "backtest",
+    "candidate": "volatility_20",
+    "symbol": "518880",
+    "status": "ok",
+    "decision": "reject",
+    "rule_id": "oos_drawdown"
+  },
+  {
+    "step": "backtest",
+    "candidate": "momentum_60",
+    "symbol": "510300",
+    "status": "ok",
+    "decision": "reject",
+    "rule_id": "not_aligned"
+  },
+  {
+    "step": "backtest",
+    "candidate": "momentum_60",
+    "symbol": "510500",
+    "status": "ok",
+    "decision": "reject",
+    "rule_id": "not_aligned"
+  },
+  {
+    "step": "backtest",
+    "candidate": "momentum_60",
+    "symbol": "518880",
+    "status": "ok",
+    "decision": "reject",
+    "rule_id": "oos_drawdown"
+  },
+  {
+    "step": "stop",
+    "reason": "oos_verdict_disclosed",
+    "provider_calls": 1
+  }
+]
