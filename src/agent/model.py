@@ -35,6 +35,10 @@ _VERDICT_KEYS = {"decision", "rule_id", "verdict"}
 class ModelError(Exception):
     """The live client rejected an input or an untrusted reply."""
 
+    def __init__(self, message: str, *, diagnostics: dict | None = None) -> None:
+        super().__init__(message)
+        self.diagnostics = diagnostics or {}
+
 
 class LiveConfigError(ModelError):
     """Live mode was requested without the configuration it requires."""
@@ -278,6 +282,7 @@ class LiveDeepSeekProvider:
         self._max_retries = max_retries
         self.calls = 0
         self.http_attempts = 0
+        self.http_responses = 0
 
     def propose(self, summaries: Mapping[str, Mapping[str, object]]) -> list[Candidate]:
         self.calls += 1
@@ -295,34 +300,38 @@ class LiveDeepSeekProvider:
             {"role": "user", "content": json.dumps({"in_sample_summaries": list(summaries.values())}, ensure_ascii=False)},
         ]
         for _round in range(self._max_calls):
-            message = self._complete(messages)
-            tool_calls = message.get("tool_calls") or []
-            if not isinstance(tool_calls, list):
-                raise ModelError("tool_calls must be a list")
-            submission = None
-            results = []
-            for call in tool_calls:
-                name, arguments, call_id = _parse_call(call)
-                if name == "submit_candidates":
-                    submission = _parse_candidates(arguments)
-                    continue
-                if name == "summarize_in_sample":
-                    content = _summary_result(arguments, summaries)
-                elif name == "backtest_candidate":
-                    _reject_keys(arguments)
-                    content = {
-                        "error": "backtest_candidate is host-only in this bounded run and does not return out-of-sample results"
-                    }
-                elif name == "write_report":
-                    _reject_keys(arguments)
-                    content = {"error": "write_report is host-only; the model cannot set a path or a verdict"}
-                else:
-                    content = {"error": "tool is not available to the model in this bounded run"}
-                results.append({"role": "tool", "tool_call_id": call_id, "content": json.dumps(content)})
-            if submission is not None:
-                return submission
-            if not results:
-                raise ModelError("model reply did not submit candidates")
+            message, reply_meta = self._complete(messages)
+            try:
+                tool_calls = message.get("tool_calls") or []
+                if not isinstance(tool_calls, list):
+                    raise ModelError("tool_calls must be a list")
+                submission = None
+                results = []
+                for call in tool_calls:
+                    name, arguments, call_id = _parse_call(call)
+                    if name == "submit_candidates":
+                        submission = _parse_candidates(arguments)
+                        continue
+                    if name == "summarize_in_sample":
+                        content = _summary_result(arguments, summaries)
+                    elif name == "backtest_candidate":
+                        _reject_keys(arguments)
+                        content = {
+                            "error": "backtest_candidate is host-only in this bounded run and does not return out-of-sample results"
+                        }
+                    elif name == "write_report":
+                        _reject_keys(arguments)
+                        content = {"error": "write_report is host-only; the model cannot set a path or a verdict"}
+                    else:
+                        content = {"error": "tool is not available to the model in this bounded run"}
+                    results.append({"role": "tool", "tool_call_id": call_id, "content": json.dumps(content)})
+                if submission is not None:
+                    return submission
+                if not results:
+                    raise ModelError("model reply did not submit candidates")
+            except ModelError as exc:
+                exc.diagnostics = _public_diagnostics(reply_meta, exc.diagnostics)
+                raise
             messages.append(message)
             messages.extend(results)
         raise ModelError("model call budget exhausted before candidates were submitted")
@@ -362,11 +371,12 @@ class LiveDeepSeekProvider:
                 raise ModelError(last_error)
             if result.status != 200:
                 raise ModelError(f"model request rejected with status {result.status}")
+            self.http_responses += 1
             return _message_from_body(result.body)
         raise ModelError(last_error)
 
 
-def _message_from_body(body: bytes) -> dict:
+def _message_from_body(body: bytes) -> tuple[dict, dict]:
     if len(body) > 1_000_000:
         raise ModelError("model response is too large")
     try:
@@ -378,10 +388,39 @@ def _message_from_body(body: bytes) -> dict:
     choices = parsed.get("choices")
     if not isinstance(choices, list) or len(choices) != 1 or not isinstance(choices[0], dict):
         raise ModelError("model response did not contain one choice")
-    message = choices[0].get("message")
+    choice = choices[0]
+    message = choice.get("message")
     if not isinstance(message, dict):
         raise ModelError("model response did not contain a message")
-    return message
+    return message, {"finish_reason": choice.get("finish_reason"), "usage": parsed.get("usage")}
+
+
+def _public_diagnostics(reply_meta: Mapping[str, object], call_diag: Mapping[str, object]) -> dict:
+    """Metadata only. Never copy argument text, headers, or secrets."""
+    out: dict = {}
+    reason = reply_meta.get("finish_reason")
+    if isinstance(reason, str) and re.fullmatch(r"[a-z0-9_]{1,32}", reason):
+        out["finish_reason"] = reason
+    usage = reply_meta.get("usage")
+    counts: dict[str, int] = {}
+    if isinstance(usage, dict):
+        for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
+            value = usage.get(key)
+            if isinstance(value, int) and not isinstance(value, bool):
+                counts[key] = value
+    if counts:
+        out["usage"] = counts
+    tool_name = call_diag.get("tool_name")
+    if isinstance(tool_name, str) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", tool_name):
+        out["tool_name"] = tool_name
+    if call_diag.get("argument_type") in {"str", "dict", "list", "int", "float", "bool", "NoneType"}:
+        out["argument_type"] = call_diag["argument_type"]
+    length = call_diag.get("argument_length")
+    if isinstance(length, int) and not isinstance(length, bool) and 0 <= length <= 10_000_000:
+        out["argument_length"] = length
+    if call_diag.get("json_error") == "JSONDecodeError":
+        out["json_error"] = "JSONDecodeError"
+    return out
 
 
 def _parse_call(call: object) -> tuple[str, dict, str]:
@@ -398,11 +437,22 @@ def _parse_call(call: object) -> tuple[str, dict, str]:
         try:
             arguments = json.loads(raw)
         except json.JSONDecodeError:
-            raise ModelError("tool arguments are not valid json") from None
+            raise ModelError(
+                "tool arguments are not valid json",
+                diagnostics={
+                    "tool_name": name,
+                    "argument_type": "str",
+                    "argument_length": len(raw),
+                    "json_error": "JSONDecodeError",
+                },
+            ) from None
     elif isinstance(raw, dict):
         arguments = raw
     else:
-        raise ModelError("tool arguments must be an object")
+        raise ModelError(
+            "tool arguments must be an object",
+            diagnostics={"tool_name": name, "argument_type": type(raw).__name__},
+        )
     if not isinstance(arguments, dict):
         raise ModelError("tool arguments must be an object")
     call_id = call.get("id")
