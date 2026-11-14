@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections.abc import Mapping
 from pathlib import Path
 
 import pandas as pd
 
 from agent.limits import HOLDOUT_NOTE, OFFLINE_BANNER, STOP_REASON
-from agent.model import validate_candidates
+from agent.model import ModelError, validate_candidates
 from agent.offline import Candidate
 from agent.probes import containment_probes
 from agent.sandbox import run_candidate
@@ -47,7 +48,11 @@ def run_bounded_experiment(
         raise ValueError("at least one symbol is required")
     directory = prepare_report_dir(output_dir, root=root, rerun=rerun)
     summaries = {symbol: summarize_bars(symbol, bars) for symbol, bars in bars_by_symbol.items()}
-    candidates = validate_candidates(list(provider.propose(summaries)))
+    try:
+        candidates = validate_candidates(list(provider.propose(summaries)))
+    except ModelError as exc:
+        _write_json(directory / "proposal_failure.json", _proposal_failure(provider, exc))
+        raise
     proposal = {
         "banner": getattr(provider, "banner", ""),
         "provider": getattr(provider, "name", type(provider).__name__),
@@ -323,3 +328,28 @@ def _redact(text: str, secret: str) -> str:
     if cleaned and cleaned in text:
         return text.replace(cleaned, "[redacted]")
     return text
+
+
+def _proposal_failure(provider, exc: ModelError) -> dict:
+    """Structured stop before any candidate is locked. No argument text and no secrets."""
+    message = _scrub(" ".join(str(exc).split()))[:200]
+    diagnostics = getattr(exc, "diagnostics", {}) or {}
+    allowed = ("finish_reason", "tool_name", "argument_type", "argument_length", "json_error", "usage")
+    safe = {key: diagnostics[key] for key in allowed if key in diagnostics}
+    return {
+        "record_type": "proposal_failure",
+        "status": "proposal_failed",
+        "error": message or "proposal failed",
+        "oos_evaluated": False,
+        "oos_disclosed": False,
+        "provider": str(getattr(provider, "name", ""))[:80],
+        "provider_calls": getattr(provider, "calls", None),
+        "http_attempts": getattr(provider, "http_attempts", None),
+        "http_responses": getattr(provider, "http_responses", None),
+        "diagnostics": safe,
+    }
+
+
+def _scrub(text: str) -> str:
+    text = re.sub(r"sk-[A-Za-z0-9_-]{6,}", "[redacted]", text)
+    return re.sub(r"(?i)bearer\s+\S+", "bearer [redacted]", text)

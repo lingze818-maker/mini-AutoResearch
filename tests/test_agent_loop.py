@@ -9,7 +9,7 @@ import pytest
 
 from agent.limits import HOLDOUT_NOTE, OFFLINE_BANNER, STOP_REASON
 from agent.loop import run_bounded_experiment
-from agent.model import build_provider
+from agent.model import LiveDeepSeekProvider, ModelError, build_provider
 from agent.offline import Candidate, OfflineFixtureProvider
 from agent.tools import (
     assert_reports_target,
@@ -248,6 +248,61 @@ def test_committed_offline_demo_records_the_stop_and_the_sentinel():
     assert state["model_calls_after_oos"] == 0
     assert [item["id"] for item in locked["candidates"]] == ["momentum_20", "volatility_20", "momentum_60"]
     assert "def generate" in locked["candidates"][0]["source"]
+
+
+def test_a_failed_proposal_writes_a_record_and_does_not_lock_candidates(tmp_path):
+    root, demo = _root(tmp_path)
+    secret = "sk-test-secret-value"
+    source = "def generate(bars):\n    return {'entry': False, 'exit': False}\n" + secret
+
+    def transport(_url, _headers, _body, _timeout):
+        body = {
+            "usage": {"prompt_tokens": 3, "completion_tokens": 4, "total_tokens": 7},
+            "choices": [
+                {
+                    "finish_reason": "length",
+                    "message": {
+                        "tool_calls": [
+                            {
+                                "id": "call_1",
+                                "type": "function",
+                                "function": {
+                                    "name": "submit_candidates",
+                                    "arguments": '{"candidates":[{"source":"' + secret,
+                                },
+                            }
+                        ]
+                    },
+                }
+            ],
+        }
+        return __import__("agent.model", fromlist=["HTTPResult"]).HTTPResult(
+            200, json.dumps(body).encode("utf-8")
+        )
+
+    provider = LiveDeepSeekProvider(api_key=secret, model="configured-by-operator", transport=transport)
+    with pytest.raises(ModelError, match="tool arguments are not valid json"):
+        run_bounded_experiment(
+            {"510300": _spanning()},
+            provider,
+            demo,
+            root=root,
+            run_failure_probes=False,
+        )
+    assert demo.is_dir()
+    names = sorted(path.name for path in demo.iterdir())
+    assert names == ["proposal_failure.json"]
+    record = json.loads((demo / "proposal_failure.json").read_text(encoding="utf-8"))
+    assert record["record_type"] == "proposal_failure"
+    assert record["oos_disclosed"] is False
+    assert record["http_attempts"] == 1
+    assert record["diagnostics"]["finish_reason"] == "length"
+    assert record["diagnostics"]["argument_type"] == "str"
+    assert "source" not in record["diagnostics"]
+    text = (demo / "proposal_failure.json").read_text(encoding="utf-8")
+    assert secret not in text
+    assert "def generate" not in text
+    assert not (demo / "candidates_locked.json").exists()
 
 
 def test_build_provider_live_false_ignores_a_present_key(monkeypatch):

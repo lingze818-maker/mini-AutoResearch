@@ -293,6 +293,106 @@ def test_redirects_are_not_followed_with_the_credential():
         handler.redirect_request(None, None, 302, "Found", {}, "http://127.0.0.1/steal")
 
 
+def _choice(arguments, *, finish_reason="tool_calls", usage=None, name="submit_candidates"):
+    body = {
+        "usage": usage
+        or {"prompt_tokens": 11, "completion_tokens": 22, "total_tokens": 33, "ignored": "no"},
+        "choices": [
+            {
+                "finish_reason": finish_reason,
+                "message": {
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {"name": name, "arguments": arguments},
+                        }
+                    ]
+                },
+            }
+        ],
+    }
+    return HTTPResult(200, json.dumps(body).encode("utf-8"))
+
+
+def test_object_arguments_are_accepted_without_a_second_decode():
+    def transport(_url, _headers, _body, _timeout):
+        return _choice({"candidates": _candidates()})
+
+    provider = LiveDeepSeekProvider(api_key=_KEY, model="configured-by-operator", transport=transport)
+    proposed = provider.propose(_summaries())
+    assert [item.id for item in proposed] == ["flat_a", "flat_b"]
+    assert provider.http_attempts == 1
+
+
+def test_truncated_and_malformed_arguments_fail_closed_without_retry():
+    calls = {"n": 0}
+
+    def transport(_url, _headers, _body, _timeout):
+        calls["n"] += 1
+        return _choice('{"candidates":[{"id":"flat_a"', finish_reason="length")
+
+    provider = LiveDeepSeekProvider(api_key=_KEY, model="configured-by-operator", transport=transport)
+    with pytest.raises(ModelError, match="tool arguments are not valid json") as caught:
+        provider.propose(_summaries())
+    assert calls["n"] == 1
+    assert provider.http_attempts == 1
+    diagnostics = caught.value.diagnostics
+    assert diagnostics["finish_reason"] == "length"
+    assert diagnostics["tool_name"] == "submit_candidates"
+    assert diagnostics["argument_type"] == "str"
+    assert diagnostics["argument_length"] == len('{"candidates":[{"id":"flat_a"')
+    assert diagnostics["json_error"] == "JSONDecodeError"
+    assert diagnostics["usage"] == {"prompt_tokens": 11, "completion_tokens": 22, "total_tokens": 33}
+    assert "ignored" not in json.dumps(diagnostics)
+    blob = json.dumps(diagnostics)
+    assert "flat_a" not in blob
+    assert _KEY not in blob
+
+    def garbage(_url, _headers, _body, _timeout):
+        calls["n"] += 1
+        return _choice("{not json")
+
+    calls["n"] = 0
+    provider = LiveDeepSeekProvider(api_key=_KEY, model="configured-by-operator", transport=garbage)
+    with pytest.raises(ModelError, match="tool arguments are not valid json"):
+        provider.propose(_summaries())
+    assert calls["n"] == 1
+
+
+def test_a_later_well_formed_call_does_not_rescue_bad_arguments():
+    def transport(_url, _headers, _body, _timeout):
+        body = {
+            "choices": [
+                {
+                    "finish_reason": "stop",
+                    "message": {
+                        "tool_calls": [
+                            {
+                                "id": "call_bad",
+                                "type": "function",
+                                "function": {"name": "submit_candidates", "arguments": '{"candidates":'},
+                            },
+                            {
+                                "id": "call_ok",
+                                "type": "function",
+                                "function": {
+                                    "name": "submit_candidates",
+                                    "arguments": json.dumps({"candidates": _candidates()}),
+                                },
+                            },
+                        ]
+                    },
+                }
+            ]
+        }
+        return HTTPResult(200, json.dumps(body).encode("utf-8"))
+
+    provider = LiveDeepSeekProvider(api_key=_KEY, model="configured-by-operator", transport=transport)
+    with pytest.raises(ModelError, match="tool arguments are not valid json"):
+        provider.propose(_summaries())
+
+
 def test_source_does_not_hardcode_a_model_id():
     text = (ROOT / "src" / "agent" / "model.py").read_text(encoding="utf-8")
     for banned in ("deepseek-chat", "deepseek-reasoner", "deepseek-v4", "gpt-4"):
