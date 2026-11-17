@@ -166,8 +166,10 @@ def proposal_tool_specs() -> list[dict]:
             "function": {
                 "name": "submit_candidates",
                 "description": (
-                    "Submit 2 or 3 causal strategies. Each source defines generate(bars) "
-                    "and will see only the prefix up to the bar it decides."
+                    "Submit 2 or 3 causal strategies in this reply. "
+                    "Each candidate has id, name, rationale, and source. "
+                    "source defines generate(bars) and sees only the prefix up to the current bar. "
+                    "Keep the call short enough to finish inside the completion cap."
                 ),
                 "parameters": {
                     "type": "object",
@@ -178,6 +180,24 @@ def proposal_tool_specs() -> list[dict]:
                             "type": "array",
                             "minItems": 2,
                             "maxItems": 3,
+                            "items": {
+                                "type": "object",
+                                "additionalProperties": False,
+                                "required": ["id", "name", "rationale", "source"],
+                                "properties": {
+                                    "id": {
+                                        "type": "string",
+                                        "pattern": _ID.pattern,
+                                        "description": "Short id: a letter, then letters, digits, or underscores.",
+                                    },
+                                    "name": {"type": "string", "description": "Short display name."},
+                                    "rationale": {"type": "string", "description": "Short reason. No verdict."},
+                                    "source": {
+                                        "type": "string",
+                                        "description": "Short Python source that defines generate(bars).",
+                                    },
+                                },
+                            },
                         }
                     },
                 },
@@ -291,8 +311,9 @@ class LiveDeepSeekProvider:
             {
                 "role": "system",
                 "content": (
-                    "Propose 2 or 3 causal daily strategies by calling submit_candidates. "
-                    "generate(bars) receives only the prefix up to the current bar. "
+                    "Call submit_candidates in this reply. Do not write a preamble. "
+                    "Submit 2 or 3 candidates, each with id, name, a short rationale, and a short source. "
+                    "The source defines generate(bars) and sees only the prefix up to the current bar. "
                     "Do not request paths, shell commands, or a verdict. "
                     "Out-of-sample results are not available."
                 ),
@@ -343,6 +364,10 @@ class LiveDeepSeekProvider:
             "max_tokens": self._max_tokens,
             "messages": messages,
             "tools": proposal_tool_specs(),
+            # Thinking is on unless this request turns it off, and those tokens
+            # share max_tokens. A chain of thought can finish the cap before
+            # submit_candidates exists. The tool call is the whole completion.
+            "thinking": {"type": "disabled"},
         }
         payload = json.dumps(body).encode("utf-8")
         if self._api_key and self._api_key.encode("utf-8") in payload:

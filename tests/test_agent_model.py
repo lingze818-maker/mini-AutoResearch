@@ -10,6 +10,7 @@ from agent.model import (
     LiveConfigError,
     LiveDeepSeekProvider,
     ModelError,
+    _ID,
     _RefuseRedirect,
     build_provider,
     official_completions_url,
@@ -398,3 +399,111 @@ def test_source_does_not_hardcode_a_model_id():
     for banned in ("deepseek-chat", "deepseek-reasoner", "deepseek-v4", "gpt-4"):
         assert banned not in text
     assert "https://api.deepseek.com" in (ROOT / "src" / "agent" / "limits.py").read_text(encoding="utf-8")
+
+
+def _normal_candidate_arguments():
+    """Three preset strategies. This is the size of a normal candidate submission."""
+    from agent.offline import MOMENTUM_20, MOMENTUM_60, VOLATILITY_20
+
+    rationale = "Causal prefix rule. The window is a preset, not a search."
+    return {
+        "candidates": [
+            {"id": "momentum_20", "name": "20-day momentum", "rationale": rationale, "source": MOMENTUM_20},
+            {"id": "volatility_20", "name": "20-day volatility ceiling", "rationale": rationale, "source": VOLATILITY_20},
+            {"id": "momentum_60", "name": "60-day momentum", "rationale": rationale, "source": MOMENTUM_60},
+        ]
+    }
+
+
+def test_normal_propose_fits_past_the_recorded_2048_cutoff():
+    """The 2026-11-15 reply used the whole 2048 cap and never called a tool.
+
+    A normal three-strategy payload must sit under a hard cap that is above
+    that cutoff and still modest. The request disables thinking so the cap is
+    spent on the tool call, and the schema names the candidate fields.
+    """
+    recorded_cutoff = 2048
+    arguments = _normal_candidate_arguments()
+    # One token per character overestimates this ASCII payload.
+    assert len(json.dumps(arguments)) < MAX_MODEL_TOKENS
+    assert recorded_cutoff < MAX_MODEL_TOKENS <= 8192
+
+    seen = {}
+
+    def transport(_url, _headers, body, _timeout):
+        seen["body"] = json.loads(body.decode("utf-8"))
+        return _reply(arguments)
+
+    provider = LiveDeepSeekProvider(api_key=_KEY, model="configured-by-operator", transport=transport)
+    proposed = provider.propose(_summaries())
+    assert [item.id for item in proposed] == ["momentum_20", "volatility_20", "momentum_60"]
+    assert provider.http_attempts == 1
+    assert seen["body"]["max_tokens"] == MAX_MODEL_TOKENS
+    assert seen["body"]["thinking"] == {"type": "disabled"}
+    assert "tool_choice" not in seen["body"]
+    assert "reasoning_effort" not in seen["body"]
+
+    system = seen["body"]["messages"][0]["content"]
+    assert "submit_candidates" in system
+    assert "Do not write a preamble" in system
+
+    spec = next(
+        item["function"]
+        for item in seen["body"]["tools"]
+        if item["function"]["name"] == "submit_candidates"
+    )
+    candidates = spec["parameters"]["properties"]["candidates"]
+    assert candidates["minItems"] == 2
+    assert candidates["maxItems"] == 3
+    item = candidates["items"]
+    assert item["additionalProperties"] is False
+    assert item["required"] == ["id", "name", "rationale", "source"]
+    assert set(item["properties"]) == {"id", "name", "rationale", "source"}
+    assert item["properties"]["id"]["pattern"] == _ID.pattern
+    for name in ("name", "rationale", "source"):
+        assert "maxLength" not in item["properties"][name]
+
+    with pytest.raises(ModelError, match="token budget"):
+        LiveDeepSeekProvider(
+            api_key=_KEY,
+            model="configured-by-operator",
+            transport=transport,
+            max_tokens=65_536,
+        )
+
+
+def test_length_cutoff_without_a_tool_call_does_not_retry_or_submit():
+    calls = {"n": 0}
+    marker = "STRATEGY-PREAMBLE-NOT-A-TOOL-CALL"
+
+    def transport(_url, _headers, _body, _timeout):
+        calls["n"] += 1
+        body = {
+            "usage": {
+                "prompt_tokens": 854,
+                "completion_tokens": MAX_MODEL_TOKENS,
+                "total_tokens": 854 + MAX_MODEL_TOKENS,
+            },
+            "choices": [
+                {
+                    "finish_reason": "length",
+                    "message": {"role": "assistant", "content": marker},
+                }
+            ],
+        }
+        return HTTPResult(200, json.dumps(body).encode("utf-8"))
+
+    provider = LiveDeepSeekProvider(api_key=_KEY, model="configured-by-operator", transport=transport)
+    with pytest.raises(ModelError, match="did not submit candidates") as caught:
+        provider.propose(_summaries())
+    assert calls["n"] == 1
+    assert provider.http_attempts == 1
+    assert provider.http_responses == 1
+    diagnostics = caught.value.diagnostics
+    assert diagnostics["finish_reason"] == "length"
+    assert diagnostics["usage"]["completion_tokens"] == MAX_MODEL_TOKENS
+    assert "tool_name" not in diagnostics
+    blob = json.dumps(diagnostics)
+    assert marker not in blob
+    assert marker not in str(caught.value)
+    assert _KEY not in blob

@@ -31,7 +31,10 @@ OPEN_FILES = 256
 
 # Live model client. The offline demo does not spend these.
 MAX_MODEL_CALLS = 2
-MAX_MODEL_TOKENS = 2048
+# Hard completion cap for one live reply. The 2026-11-15 propose stopped at
+# the previous 2048 cap with finish_reason=length and no tool call. 4096 is
+# above that cutoff and still modest next to the provider's thinking-mode default.
+MAX_MODEL_TOKENS = 4096
 MAX_MODEL_RETRIES = 1
 MODEL_TIMEOUT_S = 30.0
 
