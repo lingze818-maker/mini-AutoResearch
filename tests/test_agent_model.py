@@ -446,6 +446,9 @@ def test_normal_propose_fits_past_the_recorded_2048_cutoff():
     system = seen["body"]["messages"][0]["content"]
     assert "submit_candidates" in system
     assert "Do not write a preamble" in system
+    _assert_generate_contract(system)
+    # The contract is a few sentences. It must not crowd the 4096 completion cap.
+    assert len(system) < 900
 
     spec = next(
         item["function"]
@@ -462,6 +465,10 @@ def test_normal_propose_fits_past_the_recorded_2048_cutoff():
     assert item["properties"]["id"]["pattern"] == _ID.pattern
     for name in ("name", "rationale", "source"):
         assert "maxLength" not in item["properties"][name]
+    source_description = item["properties"]["source"]["description"]
+    assert "generate(bars)" in source_description
+    _assert_generate_contract(source_description)
+    assert len(source_description) < 450
 
     with pytest.raises(ModelError, match="token budget"):
         LiveDeepSeekProvider(
@@ -470,6 +477,16 @@ def test_normal_propose_fits_past_the_recorded_2048_cutoff():
             transport=transport,
             max_tokens=65_536,
         )
+
+
+def _assert_generate_contract(text: str) -> None:
+    """bars is a DataFrame prefix; generate() returns boolean entry/exit."""
+    assert "pandas DataFrame" in text
+    assert "date, open, high, low, close, volume" in text
+    assert 'bars["close"]' in text
+    assert "[b['close'] for b in bars]" in text
+    assert '{"entry": bool, "exit": bool}' in text
+    assert "not a float" in text
 
 
 def test_length_cutoff_without_a_tool_call_does_not_retry_or_submit():
