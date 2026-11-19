@@ -178,6 +178,28 @@ def test_malformed_output_is_rejected_and_the_next_candidate_still_runs():
     assert good.ok
 
 
+def test_row_iteration_on_the_dataframe_stays_a_typeerror():
+    """Keep passing a DataFrame. A list of dicts would hide this TypeError."""
+    source = (
+        "def generate(bars):\n"
+        "    closes = [b['close'] for b in bars]\n"
+        "    return 0.0\n"
+    )
+    outcome = run_candidate(source, bars_from_closes([100, 101, 102]), timeout_s=20)
+    assert outcome.status == "runtime_error", outcome.detail
+    assert "TypeError: string indices must be integers, not 'str'" in outcome.detail
+
+
+def test_float_return_is_malformed_output():
+    outcome = run_candidate(
+        "def generate(bars):\n    return 0.0\n",
+        bars_from_closes([100, 101, 102, 103]),
+        timeout_s=20,
+    )
+    assert outcome.status == "malformed_output", outcome.detail
+    assert outcome.detail == "generate() must return an object"
+
+
 def test_sandbox_does_not_inherit_the_host_environment(monkeypatch):
     monkeypatch.setenv("SENTINEL_SECRET", "super-secret-value")
     source = (
