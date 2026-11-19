@@ -30,6 +30,12 @@ from agent.offline import Candidate, OfflineFixtureProvider
 _ID = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
 _FORBIDDEN_KEYS = {"path", "paths", "cmd", "command", "shell", "filename", "directory", "file"}
 _VERDICT_KEYS = {"decision", "rule_id", "verdict"}
+_GENERATE_CONTRACT = (
+    "bars is a pandas DataFrame of the current prefix "
+    "(columns date, open, high, low, close, volume). "
+    'Use bars["close"]; do not write [b[\'close\'] for b in bars]. '
+    'Return {"entry": bool, "exit": bool}, not a float or a position size.'
+)
 
 
 class ModelError(Exception):
@@ -194,7 +200,10 @@ def proposal_tool_specs() -> list[dict]:
                                     "rationale": {"type": "string", "description": "Short reason. No verdict."},
                                     "source": {
                                         "type": "string",
-                                        "description": "Short Python source that defines generate(bars).",
+                                        "description": (
+                                            "Short Python source that defines generate(bars). "
+                                            + _GENERATE_CONTRACT
+                                        ),
                                     },
                                 },
                             },
@@ -314,6 +323,7 @@ class LiveDeepSeekProvider:
                     "Call submit_candidates in this reply. Do not write a preamble. "
                     "Submit 2 or 3 candidates, each with id, name, a short rationale, and a short source. "
                     "The source defines generate(bars) and sees only the prefix up to the current bar. "
+                    f"{_GENERATE_CONTRACT} "
                     "Do not request paths, shell commands, or a verdict. "
                     "Out-of-sample results are not available."
                 ),

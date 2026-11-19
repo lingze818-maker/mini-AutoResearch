@@ -119,7 +119,7 @@ PYTHONPATH=src python -m agent --demo --rerun
 
 这一轮只做一次：用样本内摘要提出 3 个预设候选，先把定义写进 `candidates_locked.json`，再跑沙箱和回测。这个锁定文件是评估前的快照：`phase` 是 `locked_before_oos`，`oos_evaluated_at_lock` 是 false。它写完就不再改，所以它旁边的 `results.json` 不能拿这个字段当成「现在还没看样本外」。最终状态在 `evaluation_state.json`：样本外已经评估并披露时，`phase` 是 `oos_disclosed`，`oos_evaluated` 和 `oos_disclosed` 都是 true。`stop.reason` 是 `oos_verdict_disclosed`，provider 只调用一次。判定来自 `judge`，模型不能改。没有用样本外结果做第二轮提案或搜参数。
 
-候选是因果的 `generate(bars)`。沙箱里的 worker 每次只收到当前 bar 和更早的 bar，再要下一根之前必须先交回这一根的布尔信号。`shift(-1)` 在当前前缀的最后一行上拿不到未来价格。宿主不 import、不 exec 生成代码，只检查信号长度、对齐和布尔类型，然后交给原来的 `run_backtest`。成交仍然是信号用当日收盘、下一根 bar 的收盘成交，手续费仍是 0。
+候选是因果的 `generate(bars)`。沙箱里的 worker 每次只收到当前 bar 和更早的 bar，再要下一根之前必须先交回这一根的布尔信号。`bars` 是 pandas DataFrame，列是 `date`、`open`、`high`、`low`、`close`、`volume`。用 `bars["close"]` 取值，不要写 `[b['close'] for b in bars]`。返回值必须是 `{"entry": bool, "exit": bool}`，不要返回浮点数或连续仓位。`shift(-1)` 在当前前缀的最后一行上拿不到未来价格。宿主不 import、不 exec 生成代码，只检查信号长度、对齐和布尔类型，然后交给原来的 `run_backtest`。成交仍然是信号用当日收盘、下一根 bar 的收盘成交，手续费仍是 0。
 
 样本外从 2024-01-01 起。这段区间已经被冻结的 20/60 双均线基线看过，是已经检查过的历史持有段，不是一份没被动过的验证集。这里的 pass 或 reject 都不是无偏发现，pass 也不表示能赚钱或可以实盘。
 
@@ -183,7 +183,7 @@ PYTHONPATH=src python -m agent --demo --rerun
 
 计划中的在线接口是 DeepSeek 的 tool calling，请求形状按常见的 chat-completions 来写，**没有对真实账号验证过**。模型名只从环境变量 `DEEPSEEK_MODEL` 读，程序不内置一个当前模型 id。凭证只发到 `https://api.deepseek.com/chat/completions`。`DEEPSEEK_BASE_URL` 只有在它就是这个 HTTPS 源站时才接受：拒绝 http、别的主机、`127.0.0.1`、用户名密码、非 443 端口、路径、query，以及重定向。重定向不会带着 Authorization 跟过去。路径是未验证的假设，不是一份已核对的现行 API 说明。
 
-在线模式必须显式加上 `--live`。密钥只读 `DEEPSEEK_API_KEY`。缺密钥或缺模型名时直接失败，**不会退回离线夹具**。调用次数最多 2 轮，每轮最多再试 1 次，只针对超时和 HTTP 500/502/503/504。工具参数不是合法 JSON 时不重试，也不加大 `max_tokens`。`max_tokens` 是 4096，单次超时 30 秒。提案请求把 `thinking.type` 设为 `disabled`，避免默认思维链把完成额度用完。系统提示要求这一次就调用 `submit_candidates`，参数写明每个候选的 id、name、rationale 和 source。工具只有样本内摘要、提交候选，以及两个宿主专用占位：回测和写报告。后两个对模型只返回拒绝，不给路径、不给样本外结果、不让模型写判定。回复和参数都会做校验。字符串参数用 `json.loads`，已经是对象的参数直接用；都不做第二次解码，也不用 `eval`。异常文本里不放 Authorization 头。
+在线模式必须显式加上 `--live`。密钥只读 `DEEPSEEK_API_KEY`。缺密钥或缺模型名时直接失败，**不会退回离线夹具**。调用次数最多 2 轮，每轮最多再试 1 次，只针对超时和 HTTP 500/502/503/504。工具参数不是合法 JSON 时不重试，也不加大 `max_tokens`。`max_tokens` 是 4096，单次超时 30 秒。提案请求把 `thinking.type` 设为 `disabled`，避免默认思维链把完成额度用完。系统提示要求这一次就调用 `submit_candidates`，参数写明每个候选的 id、name、rationale 和 source。系统提示和 `source` 说明写明：`bars` 是只含当前前缀的 pandas DataFrame，用 `bars["close"]` 取值，并返回布尔 `entry`/`exit`，不要返回浮点数。工具只有样本内摘要、提交候选，以及两个宿主专用占位：回测和写报告。后两个对模型只返回拒绝，不给路径、不给样本外结果、不让模型写判定。回复和参数都会做校验。字符串参数用 `json.loads`，已经是对象的参数直接用；都不做第二次解码，也不用 `eval`。异常文本里不放 Authorization 头。
 
 提案在锁定候选之前失败时，进程仍以错误退出，并在输出目录写 `proposal_failure.json`。里面只有错误原文、调用次数，以及 `finish_reason`、工具名、参数类型和长度、token 用量。不写参数正文，也不写密钥或请求头。2026-11-15 的一次在线提案在 `finish_reason=length`、completion token 等于当时的 2048 上限、且没有工具调用时失败。截断或非法的工具参数仍然拒绝，不会当成成功，也不会因此重试。
 
