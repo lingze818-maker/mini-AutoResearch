@@ -10,7 +10,13 @@ from pathlib import Path
 
 import pandas as pd
 
-from agent.limits import HOLDOUT_NOTE, OFFLINE_BANNER, STOP_REASON
+from agent.limits import (
+    HOLDOUT_NOTE,
+    OFFLINE_BANNER,
+    STOP_REASON,
+    WALK_FORWARD_HOLDOUT_KIND,
+    WALK_FORWARD_HOLDOUT_NOTE,
+)
 from agent.model import ModelError, validate_candidates
 from agent.offline import Candidate
 from agent.probes import containment_probes
@@ -228,14 +234,20 @@ def _result_row(candidate_id: str, symbol: str, record: BacktestRecord) -> dict:
 
 def _holdout() -> dict:
     window = active_split()
+    if window.name == "default":
+        kind = "already_inspected_historical_holdout"
+        note = HOLDOUT_NOTE
+    else:
+        kind = WALK_FORWARD_HOLDOUT_KIND
+        note = WALK_FORWARD_HOLDOUT_NOTE
     return {
-        "kind": "already_inspected_historical_holdout",
+        "kind": kind,
         "fold": window.name,
         "in_sample_start": window.in_sample_start,
         "in_sample_end": window.in_sample_end,
         "out_of_sample_start": window.out_of_sample_start,
         "out_of_sample_end": window.out_of_sample_end,
-        "note": HOLDOUT_NOTE,
+        "note": note,
     }
 
 

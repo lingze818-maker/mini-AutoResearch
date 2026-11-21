@@ -7,8 +7,8 @@ import json
 import pandas as pd
 import pytest
 
-from agent.limits import OFFLINE_BANNER
-from agent.loop import run_bounded_experiment
+from agent.limits import HOLDOUT_NOTE, OFFLINE_BANNER
+from agent.loop import _holdout, run_bounded_experiment
 from agent.offline import Candidate
 from agent.tools import BacktestRecord, summarize_bars
 from config_loader import load_config
@@ -53,6 +53,14 @@ FROZEN = {
     },
 }
 
+_DEFAULT_HOLDOUT_KIND = "already_inspected_historical_holdout"
+_WALK_FORWARD_HOLDOUT_KIND = "pre_registered_walk_forward"
+_WALK_FORWARD_HOLDOUT_NOTE = (
+    "This is a pre-registered walk-forward window, not the previously disclosed "
+    "2024-2026 holdout. These dates were part of the earlier in-sample period, "
+    "so this is still not a genuinely untouched validation set. "
+    "Pass or reject here is not an unbiased discovery, and it is not a tradable result."
+)
 _BEFORE = "2018-12-31"
 _SHARED_IN_SAMPLE = "2020-06-01"
 _SOURCE = "def generate(bars):\n    return {'entry': False, 'exit': False}\n"
@@ -214,6 +222,37 @@ def test_selected_window_keeps_its_ends_and_drops_outside_bars(name):
     assert metrics.out_of_sample_end == spec["out_of_sample_end"]
     assert metrics.in_sample.period_return == pytest.approx(0.0)
     assert metrics.out_of_sample.period_return == pytest.approx(1.10 * 1.20 - 1.0)
+
+
+def test_default_holdout_keeps_the_inspected_baseline_note():
+    recorded = _holdout()
+    with use_split("default"):
+        selected = _holdout()
+    for holdout in (recorded, selected):
+        assert holdout["fold"] == "default"
+        assert holdout["kind"] == _DEFAULT_HOLDOUT_KIND
+        assert holdout["note"] == HOLDOUT_NOTE
+        assert "20/60" in holdout["note"]
+        assert "already judged" in holdout["note"]
+
+
+@pytest.mark.parametrize("name", ["A", "B", "C"])
+def test_walk_forward_holdout_does_not_claim_the_baseline_was_judged_on_these_dates(name):
+    with use_split(name):
+        holdout = _holdout()
+    assert holdout["fold"] == name
+    assert holdout["kind"] == _WALK_FORWARD_HOLDOUT_KIND
+    assert holdout["kind"] != _DEFAULT_HOLDOUT_KIND
+    assert holdout["note"] == _WALK_FORWARD_HOLDOUT_NOTE
+    assert holdout["note"] != HOLDOUT_NOTE
+    assert "pre-registered walk-forward" in holdout["note"]
+    assert "not the previously disclosed 2024-2026 holdout" in holdout["note"]
+    assert "earlier in-sample period" in holdout["note"]
+    assert "not an unbiased discovery" in holdout["note"]
+    assert "not a tradable result" in holdout["note"]
+    assert "20/60" not in holdout["note"]
+    assert "already judged" not in holdout["note"]
+    assert "already-inspected historical holdout" not in holdout["note"]
 
 
 def test_folds_do_not_use_the_default_holdout_as_out_of_sample():
@@ -392,6 +431,18 @@ def test_one_run_proposes_once_on_the_selected_in_sample_summary(name, tmp_path,
     assert proposal["holdout"]["in_sample_end"] == spec["in_sample_end"]
     assert proposal["holdout"]["out_of_sample_start"] == spec["out_of_sample_start"]
     assert proposal["holdout"]["out_of_sample_end"] == spec["out_of_sample_end"]
+    if name == "default":
+        assert proposal["holdout"]["kind"] == _DEFAULT_HOLDOUT_KIND
+        assert proposal["holdout"]["note"] == HOLDOUT_NOTE
+    else:
+        assert proposal["holdout"]["kind"] == _WALK_FORWARD_HOLDOUT_KIND
+        assert proposal["holdout"]["note"] == _WALK_FORWARD_HOLDOUT_NOTE
+        assert "20/60" not in proposal["holdout"]["note"]
+    summary = json.loads((demo / "summary.json").read_text(encoding="utf-8"))
+    assert summary["holdout"]["kind"] == proposal["holdout"]["kind"]
+    assert summary["holdout"]["note"] == proposal["holdout"]["note"]
+    assert document["holdout"]["kind"] == proposal["holdout"]["kind"]
+    assert document["holdout"]["note"] == proposal["holdout"]["note"]
     assert document["results"][0]["in_sample_end"] == spec["in_sample_end"]
     assert document["results"][0]["out_of_sample_start"] == spec["out_of_sample_start"]
     assert document["results"][0]["out_of_sample_end"] == spec["out_of_sample_end"]
