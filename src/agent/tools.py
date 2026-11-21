@@ -17,6 +17,7 @@ from backtest.runner import load_bars, run_backtest, validate_bars
 from config_loader import ROOT, load_config
 from eval.judge import JudgeResult, judge
 from eval.metrics import SplitMetrics, evaluate
+from eval.splits import active_split
 
 _SYMBOL = re.compile(r"^[0-9A-Za-z._-]{1,16}$")
 _RUN_ID = re.compile(r"^[a-z0-9][a-z0-9_-]{0,40}$")
@@ -40,24 +41,27 @@ def configured_symbols() -> tuple[str, ...]:
 
 def in_sample_slice(bars: pd.DataFrame) -> pd.DataFrame:
     frame = validate_bars(bars)
-    end = pd.Timestamp(load_config()["dates"]["in_sample_end"]).normalize()
-    kept = frame.loc[frame["date"] <= end].reset_index(drop=True)
+    window = active_split()
+    start = pd.Timestamp(window.in_sample_start).normalize()
+    end = pd.Timestamp(window.in_sample_end).normalize()
+    kept = frame.loc[(frame["date"] >= start) & (frame["date"] <= end)].reset_index(drop=True)
     if kept.empty:
         raise ValueError("no in-sample bars")
     return kept
 
 
 def summarize_bars(symbol: str, bars: pd.DataFrame) -> dict:
-    """Describe only the in-sample window. Out-of-sample rows are dropped first."""
+    """Describe only the selected in-sample window. Later rows are dropped first."""
     if not _SYMBOL.fullmatch(symbol):
         raise ValueError("invalid symbol")
+    window = active_split()
     frame = in_sample_slice(bars)
     close = frame["close"].astype(float)
     returns = close.pct_change().iloc[1:]
     deviation = float(returns.std(ddof=0)) if len(returns) else 0.0
     return {
         "symbol": symbol,
-        "in_sample_end": str(load_config()["dates"]["in_sample_end"]),
+        "in_sample_end": window.in_sample_end,
         "bar_count": int(len(frame)),
         "start": pd.Timestamp(frame["date"].iloc[0]).strftime("%Y-%m-%d"),
         "end": pd.Timestamp(frame["date"].iloc[-1]).strftime("%Y-%m-%d"),
