@@ -10,7 +10,13 @@ from pathlib import Path
 
 import pandas as pd
 
-from agent.limits import HOLDOUT_NOTE, OFFLINE_BANNER, STOP_REASON
+from agent.limits import (
+    HOLDOUT_NOTE,
+    OFFLINE_BANNER,
+    STOP_REASON,
+    WALK_FORWARD_HOLDOUT_KIND,
+    WALK_FORWARD_HOLDOUT_NOTE,
+)
 from agent.model import ModelError, validate_candidates
 from agent.offline import Candidate
 from agent.probes import containment_probes
@@ -24,8 +30,9 @@ from agent.tools import (
     summarize_bars,
     write_named_files,
 )
-from config_loader import CONFIG_PATH, load_config
+from config_loader import CONFIG_PATH
 from eval.judge import judge
+from eval.splits import active_split, use_split
 
 _SENTINEL_TEXT = "HOST-SENTINEL-UNCHANGED\n"
 
@@ -38,12 +45,34 @@ def run_bounded_experiment(
     root: Path,
     rerun: bool = False,
     run_failure_probes: bool = True,
+    fold: str = "default",
 ) -> dict:
     """Lock proposals from in-sample summaries, judge them once, then stop.
 
     The provider is not called again after the first out-of-sample verdict.
     Failure probes are recorded and do not remove the locked candidates.
+    ``fold`` selects one registered split for this run.
     """
+    with use_split(fold):
+        return _run_bounded_experiment(
+            bars_by_symbol,
+            provider,
+            output_dir,
+            root=root,
+            rerun=rerun,
+            run_failure_probes=run_failure_probes,
+        )
+
+
+def _run_bounded_experiment(
+    bars_by_symbol: Mapping[str, pd.DataFrame],
+    provider,
+    output_dir: Path,
+    *,
+    root: Path,
+    rerun: bool = False,
+    run_failure_probes: bool = True,
+) -> dict:
     if not bars_by_symbol:
         raise ValueError("at least one symbol is required")
     directory = prepare_report_dir(output_dir, root=root, rerun=rerun)
@@ -197,18 +226,28 @@ def _result_row(candidate_id: str, symbol: str, record: BacktestRecord) -> dict:
     if record.metrics is not None:
         row["in_sample_end"] = record.metrics.in_sample_end
         row["out_of_sample_start"] = record.metrics.out_of_sample_start
+        row["out_of_sample_end"] = record.metrics.out_of_sample_end
         row["in_sample"] = record.metrics.in_sample.as_dict()
         row["out_of_sample"] = record.metrics.out_of_sample.as_dict()
     return row
 
 
 def _holdout() -> dict:
-    dates = load_config()["dates"]
+    window = active_split()
+    if window.name == "default":
+        kind = "already_inspected_historical_holdout"
+        note = HOLDOUT_NOTE
+    else:
+        kind = WALK_FORWARD_HOLDOUT_KIND
+        note = WALK_FORWARD_HOLDOUT_NOTE
     return {
-        "kind": "already_inspected_historical_holdout",
-        "in_sample_end": str(dates["in_sample_end"]),
-        "out_of_sample_start": str(pd.Timestamp(dates["in_sample_end"]) + pd.Timedelta(days=1))[:10],
-        "note": HOLDOUT_NOTE,
+        "kind": kind,
+        "fold": window.name,
+        "in_sample_start": window.in_sample_start,
+        "in_sample_end": window.in_sample_end,
+        "out_of_sample_start": window.out_of_sample_start,
+        "out_of_sample_end": window.out_of_sample_end,
+        "note": note,
     }
 
 

@@ -7,7 +7,7 @@ from dataclasses import dataclass
 
 import pandas as pd
 
-from config_loader import load_config
+from eval.splits import active_split
 
 CURVE_COLUMNS = ("date", "equity", "return", "position")
 
@@ -50,6 +50,7 @@ class SplitMetrics:
     out_of_sample: PeriodMetrics
     in_sample_end: str
     out_of_sample_start: str
+    out_of_sample_end: str = ""
 
 
 def period_return(returns: pd.Series) -> float:
@@ -115,12 +116,15 @@ def _prepare_curve(curve: pd.DataFrame) -> pd.DataFrame:
 
 
 def evaluate(curve: pd.DataFrame) -> SplitMetrics:
-    """Split `curve` with config.yaml's in_sample_end. That date is inclusive."""
+    """Split `curve` on the active registered window. Both ends are inclusive."""
     frame = _prepare_curve(curve)
-    in_sample_end = pd.Timestamp(load_config()["dates"]["in_sample_end"]).normalize()
-    out_of_sample_start = in_sample_end + pd.Timedelta(days=1)
-    in_sample = frame["date"] <= in_sample_end
-    out_of_sample = frame["date"] > in_sample_end
+    window = active_split()
+    in_sample_start = pd.Timestamp(window.in_sample_start).normalize()
+    in_sample_end = pd.Timestamp(window.in_sample_end).normalize()
+    out_start = pd.Timestamp(window.out_of_sample_start).normalize()
+    out_end = pd.Timestamp(window.out_of_sample_end).normalize()
+    in_sample = (frame["date"] >= in_sample_start) & (frame["date"] <= in_sample_end)
+    out_of_sample = (frame["date"] >= out_start) & (frame["date"] <= out_end)
     if not bool(in_sample.any()):
         raise ValueError("in-sample period has no bars on or before in_sample_end")
     if not bool(out_of_sample.any()):
@@ -139,6 +143,7 @@ def evaluate(curve: pd.DataFrame) -> SplitMetrics:
     return SplitMetrics(
         in_sample=in_sample_metrics,
         out_of_sample=summarize(out_of_sample, anchor),
-        in_sample_end=in_sample_end.strftime("%Y-%m-%d"),
-        out_of_sample_start=out_of_sample_start.strftime("%Y-%m-%d"),
+        in_sample_end=window.in_sample_end,
+        out_of_sample_start=window.out_of_sample_start,
+        out_of_sample_end=window.out_of_sample_end,
     )

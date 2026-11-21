@@ -52,4 +52,14 @@ HOLDOUT_NOTE = (
     "the rule is profitable or ready for live trading."
 )
 
+# Folds A, B, and C were inside the old in-sample period. They are not the
+# 2024-2026 window on which the frozen 20/60 baseline was judged.
+WALK_FORWARD_HOLDOUT_KIND = "pre_registered_walk_forward"
+WALK_FORWARD_HOLDOUT_NOTE = (
+    "This is a pre-registered walk-forward window, not the previously disclosed "
+    "2024-2026 holdout. These dates were part of the earlier in-sample period, "
+    "so this is still not a genuinely untouched validation set. "
+    "Pass or reject here is not an unbiased discovery, and it is not a tradable result."
+)
+
 STOP_REASON = "oos_verdict_disclosed"

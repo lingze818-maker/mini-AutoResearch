@@ -17,7 +17,24 @@ universe:
 dates:
   start: "2019-01-01"
   end: "2026-10-31"          # 固定截止到立项前最后一个完整月，不随「今天」变动
-  in_sample_end: "2023-12-31"  # 含当天；样本外为 2024-01-01 至 end
+  in_sample_end: "2023-12-31"  # 含当天；默认样本外为 2024-01-01 至 end
+  # 预注册走步折。一次运行只选 A、B、C 或默认切分。样本外截止日含当天。
+  folds:
+    A:
+      in_sample_start: "2019-01-01"
+      in_sample_end: "2020-12-31"
+      out_of_sample_start: "2021-01-01"
+      out_of_sample_end: "2021-12-31"
+    B:
+      in_sample_start: "2019-01-01"
+      in_sample_end: "2021-12-31"
+      out_of_sample_start: "2022-01-01"
+      out_of_sample_end: "2022-12-31"
+    C:
+      in_sample_start: "2019-01-01"
+      in_sample_end: "2022-12-31"
+      out_of_sample_start: "2023-01-01"
+      out_of_sample_end: "2023-12-31"
 
 paths:
   raw: "data/raw"

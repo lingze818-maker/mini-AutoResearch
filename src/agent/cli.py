@@ -10,13 +10,25 @@ from agent.loop import run_bounded_experiment
 from agent.model import LiveConfigError, build_provider
 from agent.tools import load_universe_bars
 from config_loader import ROOT
+from eval.splits import registered_splits
 
 
 def main(argv: list[str] | None = None) -> int:
+    try:
+        fold_names = tuple(registered_splits())
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
     parser = argparse.ArgumentParser(description="跑一轮锁定候选、沙箱回测和写死判定，然后停止。")
     parser.add_argument("--demo", action="store_true", help="用本地干净日线跑离线夹具，或在 --live 时请求模型")
     parser.add_argument("--live", action="store_true", help="显式使用环境变量里的模型密钥；缺密钥不会退回离线夹具")
     parser.add_argument("--rerun", action="store_true", help="只替换本次输出目录，不会动 reports/baseline")
+    parser.add_argument(
+        "--fold",
+        default="default",
+        choices=fold_names,
+        help="预注册走步折 A、B、C，或原来的默认切分",
+    )
     parser.add_argument(
         "--out",
         default="reports/agent_demo",
@@ -31,6 +43,7 @@ def main(argv: list[str] | None = None) -> int:
         print(str(exc), file=sys.stderr)
         return 2
     print(provider.banner)
+    print(f"fold: {args.fold}")
     if args.live:
         print("live integration is unverified and was not used to produce the committed offline demo")
     output = Path(args.out)
@@ -45,6 +58,7 @@ def main(argv: list[str] | None = None) -> int:
             root=ROOT,
             rerun=args.rerun,
             run_failure_probes=True,
+            fold=args.fold,
         )
     except (FileExistsError, ValueError, FileNotFoundError) as exc:
         print(str(exc), file=sys.stderr)
